@@ -1,30 +1,44 @@
 """Backbone registry for vision feature extractors."""
-from torchvision.models.efficientnet import efficientnet_b0, efficientnet_v2_s
-from torchvision.models.convnext import convnext_tiny, convnext_small
-from torchvision.models.resnet import resnet18, resnet34
+from torchvision.models.efficientnet import (
+    efficientnet_b0, EfficientNet_B0_Weights,
+    efficientnet_v2_s, EfficientNet_V2_S_Weights,
+)
+from torchvision.models.convnext import (
+    convnext_tiny, ConvNeXt_Tiny_Weights,
+    convnext_small, ConvNeXt_Small_Weights,
+)
+from torchvision.models.resnet import (
+    resnet18, ResNet18_Weights,
+    resnet34, ResNet34_Weights,
+)
 
 
 BACKBONES = {
-    "efficientnet_b0": (efficientnet_b0, 1280),
-    "efficientnet_v2_s": (efficientnet_v2_s, 1280),
-    "convnext_tiny": (convnext_tiny, 768),
-    "convnext_small": (convnext_small, 768),
-    "resnet18": (resnet18, 512),
-    "resnet34": (resnet34, 512),
+    "efficientnet_b0": (efficientnet_b0, EfficientNet_B0_Weights.DEFAULT, 1280),
+    "efficientnet_v2_s": (efficientnet_v2_s, EfficientNet_V2_S_Weights.DEFAULT, 1280),
+    "convnext_tiny": (convnext_tiny, ConvNeXt_Tiny_Weights.DEFAULT, 768),
+    "convnext_small": (convnext_small, ConvNeXt_Small_Weights.DEFAULT, 768),
+    "resnet18": (resnet18, ResNet18_Weights.DEFAULT, 512),
+    "resnet34": (resnet34, ResNet34_Weights.DEFAULT, 512),
 }
 
 
-def get_backbone(name: str):
+def get_backbone(name: str, pretrained: bool = True):
     """Return (feature_extractor, output_dim) for a given backbone name.
 
     The feature extractor is the backbone without the classification head,
     outputting a 4D tensor [B, C, H, W].
+
+    Args:
+        name: Backbone name (must be a key in BACKBONES).
+        pretrained: If True, load DEFAULT pretrained weights. If False, random init.
     """
     if name not in BACKBONES:
         raise ValueError(f"Unknown backbone: {name}. Available: {list(BACKBONES.keys())}")
 
-    factory, out_dim = BACKBONES[name]
-    model = factory()
+    factory, default_weights, out_dim = BACKBONES[name]
+    weights = default_weights if pretrained else None
+    model = factory(weights=weights)
 
     # Extract just the feature layers (no classifier head)
     if name.startswith("efficientnet"):
