@@ -11,17 +11,14 @@ from peft import LoraConfig, get_peft_model
 
 class RegressionModelNoPatch(L.LightningModule):
 
-  def __init__(self, backbone="efficientnet_b0", warmup_steps: int = 1000, max_lr: float = 0.256,
+  def __init__(self, backbone="efficientnet_b0", summary_dim: int = 8,
+               warmup_steps: int = 1000, max_lr: float = 0.256,
                decay_rate: float = 0.97, decay_every_epochs: int = 2, dropout_rate: float = 0.2,
-               loss_type: str = "log_prob", freeze_backbone: bool = False,
+               freeze_backbone: bool = False,
                pretrained_checkpoint_path: str = None,
                use_peft: bool = False, lora_r: int = 8, lora_alpha: int = 16,
                lora_dropout: float = 0.1, lora_target_modules: list = None):
     super().__init__()
-
-    # Validate loss_type parameter
-    if loss_type not in ["log_prob", "score"]:
-      raise ValueError(f"loss_type must be 'log_prob' or 'score', got '{loss_type}'")
 
     self.mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
@@ -96,7 +93,7 @@ class RegressionModelNoPatch(L.LightningModule):
       'decay_rate': decay_rate,
       'decay_every_epochs': decay_every_epochs,
       'dropout_rate': dropout_rate,
-      'loss_type': loss_type,
+      'summary_dim': summary_dim,
       'freeze_backbone': freeze_backbone,
       'use_peft': use_peft,
       'lora_r': lora_r,
@@ -110,10 +107,12 @@ class RegressionModelNoPatch(L.LightningModule):
      nn.Flatten(),
      nn.Dropout(p=self.hparams.dropout_rate, inplace=True),
     )
+    self.compressor = nn.Linear(last_dim, summary_dim)
     self.head = nn.Sequential(
-     nn.Linear(last_dim, 128),
      nn.GELU(),
-     nn.Linear(128, 2*2) # Outputing mean and log-variance
+     nn.Linear(summary_dim, summary_dim * 4),
+     nn.GELU(),
+     nn.Linear(summary_dim * 4, 2*2) # mean and log-std for Ω_m, S_8
     )
 
     # Load pretrained weights if checkpoint path is provided
@@ -136,9 +135,10 @@ class RegressionModelNoPatch(L.LightningModule):
     features = self.model(x.float())
     features = self.reshape_head(features)
 
-    # Head to get final predictions
-    x = self.head(features)
-    return x[..., :2], F.softplus(x[..., 2:]) + 0.001  # Return mean and scale
+    # Compress to summary statistics then predict Gaussian parameters
+    summaries = self.compressor(features)
+    x = self.head(summaries)
+    return x[..., :2], F.softplus(x[..., 2:]) + 0.001, summaries  # mean, std, summaries
 
   def load_pretrained_weights(self, checkpoint_path: str):
     """Load weights from a pretrained checkpoint.
@@ -241,23 +241,9 @@ class RegressionModelNoPatch(L.LightningModule):
     shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
     x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
 
-    mean, std = self(x)
+    mean, std, _ = self(x)
 
-    if self.hparams.loss_type == "log_prob":
-      loss = - torch.distributions.Normal(loc=mean, scale=std).log_prob(y)
-      loss = loss.mean()
-    elif self.hparams.loss_type == "score":
-      # Rescaling back to original parameters
-      mean = mean * torch.tensor(THETA_STD[:2], device=mean.device) + torch.tensor(THETA_MEAN[:2], device=mean.device)
-      std = std * torch.tensor(THETA_STD[:2], device=std.device)
-      y = y[:, :2] * torch.tensor(THETA_STD[:2], device=y.device) + torch.tensor(THETA_MEAN[:2], device=y.device)
-
-      # Use the Phase 1 score as the loss (negative because we minimize)
-      sq_error = (y - mean) ** 2
-      scale_factor = 1000.0
-      score = -torch.sum(sq_error / std**2 + torch.log(std**2) + scale_factor * sq_error, dim=1)
-      loss = -torch.mean(score)  # Negative because we want to maximize the score
-
+    loss = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
     self.log('train_loss', loss)
     return loss
 
@@ -269,9 +255,9 @@ class RegressionModelNoPatch(L.LightningModule):
     x = x + noise
     x = x * torch.tensor(self.mask, device=x.device).unsqueeze(0)
 
-    mean, std = self(x)
+    mean, std, _ = self(x)
 
-    # Rescaling back to original parameters, for log_prob loss we do it here
+    # Rescaling back to original parameters
     mean = mean * torch.tensor(THETA_STD[:2], device=mean.device) + torch.tensor(THETA_MEAN[:2], device=mean.device)
     std = std * torch.tensor(THETA_STD[:2], device=std.device)
     y = y[:, :2] * torch.tensor(THETA_STD[:2], device=y.device) + torch.tensor(THETA_MEAN[:2], device=y.device)
