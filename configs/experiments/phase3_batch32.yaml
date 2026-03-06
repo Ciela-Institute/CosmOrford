@@ -1,0 +1,41 @@
+model:
+  class_path: cosmorford.compressor.CompressorModel
+  init_args:
+    backbone: "efficientnet_b0"  # TODO: replace with Phase 2 winner
+    bottleneck_dim: 8
+    warmup_steps: 500
+    max_lr: 0.008
+    decay_rate: 0.85
+    dropout_rate: 0.2
+    lr_schedule: "cosine"
+
+data:
+  class_path: cosmorford.dataset.WLDataModule
+  init_args:
+    batch_size: 32
+    num_workers: 8
+
+trainer:
+  max_epochs: 30
+  accelerator: gpu
+  precision: "16-mixed"
+  gradient_clip_val: 1.0
+  log_every_n_steps: 1
+  check_val_every_n_epoch: 1
+  callbacks:
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: "step"
+    - class_path: ModelCheckpoint
+      init_args:
+        monitor: "val_loss"
+        mode: "min"
+        save_top_k: 3
+        save_last: true
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: "P3-batch32"
+      project: "cosmorford"
+      tags: ["phase3", "batch32"]
+      log_model: true
