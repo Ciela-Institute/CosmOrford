@@ -22,6 +22,7 @@ dependencies = [
     "wandb",
     "omegaconf",
     "pyyaml",
+    "jsonargparse[signatures,omegaconf]>=4.27.7",
 ]
 
 [project.optional-dependencies]

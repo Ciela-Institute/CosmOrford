@@ -18,6 +18,7 @@ image = (
         "wandb",
         "omegaconf",
         "pyyaml",
+        "jsonargparse[signatures,omegaconf]>=4.27.7",
     )
     .copy_local_dir("cosmorford", "/root/cosmorford")
     .copy_local_dir("configs", "/root/configs")
