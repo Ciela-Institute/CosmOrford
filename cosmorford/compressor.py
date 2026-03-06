@@ -20,9 +20,13 @@ class CompressorModel(L.LightningModule):
         decay_every_epochs: int = 1,
         dropout_rate: float = 0.2,
         lr_schedule: str = "cosine",
+        use_sam: bool = False,
+        sam_rho: float = 0.05,
     ):
         super().__init__()
         self.save_hyperparameters()
+        if use_sam:
+            self.automatic_optimization = False
 
         features, feat_dim = get_backbone(backbone, pretrained=True)
         self.backbone = adapt_first_conv(features, backbone)
@@ -84,10 +88,31 @@ class CompressorModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         x = self._augment(x)
-        mean, std = self(x)
-        loss = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
-        self.log("train_loss", loss)
-        return loss
+
+        if self.hparams.use_sam:
+            opt = self.optimizers()
+            sch = self.lr_schedulers()
+
+            # First forward-backward
+            mean, std = self(x)
+            loss = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+            self.manual_backward(loss)
+            opt.first_step(zero_grad=True)
+
+            # Second forward-backward
+            mean, std = self(x)
+            loss2 = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+            self.manual_backward(loss2)
+            opt.second_step(zero_grad=True)
+            sch.step()
+
+            self.log("train_loss", loss)
+            return loss
+        else:
+            mean, std = self(x)
+            loss = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+            self.log("train_loss", loss)
+            return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
@@ -110,27 +135,38 @@ class CompressorModel(L.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.max_lr, weight_decay=1e-5)
+        if self.hparams.use_sam:
+            from cosmorford.sam import SAM
+            optimizer = SAM(
+                self.parameters(), torch.optim.AdamW,
+                lr=self.hparams.max_lr, weight_decay=1e-5, rho=self.hparams.sam_rho,
+            )
+            # Use base_optimizer for schedulers since SequentialLR needs a real optimizer
+            sched_optimizer = optimizer.base_optimizer
+        else:
+            optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.max_lr, weight_decay=1e-5)
+            sched_optimizer = optimizer
+
         total_steps = int(self.trainer.estimated_stepping_batches)
         warmup_steps = self.hparams.warmup_steps
 
         warmup = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1e-10, end_factor=1.0, total_iters=warmup_steps
+            sched_optimizer, start_factor=1e-10, end_factor=1.0, total_iters=warmup_steps
         )
 
         if self.hparams.lr_schedule == "cosine":
             main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=total_steps - warmup_steps
+                sched_optimizer, T_max=total_steps - warmup_steps
             )
         else:  # "step"
             steps_per_epoch = total_steps // self.trainer.max_epochs
             step_size = self.hparams.decay_every_epochs * steps_per_epoch
             main_scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer, step_size=step_size, gamma=self.hparams.decay_rate
+                sched_optimizer, step_size=step_size, gamma=self.hparams.decay_rate
             )
 
         scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer, schedulers=[warmup, main_scheduler], milestones=[warmup_steps]
+            sched_optimizer, schedulers=[warmup, main_scheduler], milestones=[warmup_steps]
         )
         return {
             "optimizer": optimizer,
