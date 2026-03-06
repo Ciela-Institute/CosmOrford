@@ -20,9 +20,9 @@ image = (
         "pyyaml",
         "jsonargparse[signatures,omegaconf]>=4.27.7",
     )
-    .copy_local_dir("cosmorford", "/root/cosmorford")
-    .copy_local_dir("configs", "/root/configs")
-    .copy_local_file("pyproject.toml", "/root/pyproject.toml")
+    .add_local_dir("cosmorford", "/root/cosmorford", copy=True)
+    .add_local_dir("configs", "/root/configs", copy=True)
+    .add_local_file("pyproject.toml", "/root/pyproject.toml", copy=True)
     .run_commands("cd /root && pip install -e .")
 )
 
@@ -36,7 +36,7 @@ CHECKPOINTS_PATH = VOLUME_PATH / "checkpoints"
     volumes={VOLUME_PATH: volume},
     gpu="a10g",
     timeout=86400,
-    retries=modal.Retries(initial_delay=0.0, max_retries=3),
+    retries=modal.Retries(initial_delay=0.0, max_retries=0),
     single_use_containers=True,
     secrets=[modal.Secret.from_name("wandb-secret")],
 )
@@ -50,7 +50,7 @@ def train(config_path: str, experiment_name: Optional[str] = None):
     cmd = [
         "trainer", "fit",
         f"--config=/root/{config_path}",
-        f"--trainer.callbacks.1.init_args.dirpath={checkpoint_dir}",
+        f"--trainer.default_root_dir={checkpoint_dir}",
     ]
 
     if last_ckpt.exists():
