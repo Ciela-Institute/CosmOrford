@@ -38,3 +38,35 @@ def test_adapt_first_conv_efficientnet():
     x = torch.randn(1, 1, 224, 224)
     out = features(x)
     assert out.shape[1] == dim
+
+
+def test_swin_v2_t_backbone():
+    features, dim = get_backbone("swin_v2_t", pretrained=True)
+    x = torch.randn(1, 3, 256, 256)  # Swin needs sizes divisible by window
+    out = features(x)
+    assert out.shape[1] == dim
+
+
+def test_maxvit_t_backbone():
+    features, dim = get_backbone("maxvit_t", pretrained=True)
+    x = torch.randn(1, 3, 224, 224)
+    out = features(x)
+    assert out.shape[1] == dim
+
+
+def test_adapt_first_conv_swin():
+    from cosmorford.backbones import adapt_first_conv
+    features, dim = get_backbone("swin_v2_t", pretrained=True)
+    features = adapt_first_conv(features, "swin_v2_t")
+    x = torch.randn(1, 1, 256, 256)
+    out = features(x)
+    assert out.shape[1] == dim
+
+
+def test_adapt_first_conv_maxvit():
+    from cosmorford.backbones import adapt_first_conv
+    features, dim = get_backbone("maxvit_t", pretrained=True)
+    features = adapt_first_conv(features, "maxvit_t")
+    x = torch.randn(1, 1, 224, 224)
+    out = features(x)
+    assert out.shape[1] == dim
