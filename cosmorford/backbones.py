@@ -1,4 +1,6 @@
 """Backbone registry for vision feature extractors."""
+import torch
+import torch.nn as nn
 from torchvision.models.efficientnet import (
     efficientnet_b0, EfficientNet_B0_Weights,
     efficientnet_v2_s, EfficientNet_V2_S_Weights,
@@ -46,7 +48,6 @@ def get_backbone(name: str, pretrained: bool = True):
     elif name.startswith("convnext"):
         features = model.features
     elif name.startswith("resnet"):
-        import torch.nn as nn
         # ResNet: everything except avgpool and fc
         features = nn.Sequential(
             model.conv1, model.bn1, model.relu, model.maxpool,
@@ -54,3 +55,35 @@ def get_backbone(name: str, pretrained: bool = True):
         )
 
     return features, out_dim
+
+
+def adapt_first_conv(features, name: str):
+    """Replace first conv layer from 3-channel to 1-channel input.
+    Sums pretrained 3-channel weights into a single channel."""
+    if name.startswith("resnet"):
+        old_conv = features[0]  # conv1
+    elif name.startswith("efficientnet"):
+        old_conv = features[0][0]  # features[0] is first ConvBNActivation block
+    elif name.startswith("convnext"):
+        old_conv = features[0][0]  # features[0] is the stem
+
+    new_conv = nn.Conv2d(
+        1, old_conv.out_channels,
+        kernel_size=old_conv.kernel_size,
+        stride=old_conv.stride,
+        padding=old_conv.padding,
+        bias=old_conv.bias is not None,
+    )
+    with torch.no_grad():
+        new_conv.weight.copy_(old_conv.weight.sum(dim=1, keepdim=True))
+        if old_conv.bias is not None:
+            new_conv.bias.copy_(old_conv.bias)
+
+    if name.startswith("resnet"):
+        features[0] = new_conv
+    elif name.startswith("efficientnet"):
+        features[0][0] = new_conv
+    elif name.startswith("convnext"):
+        features[0][0] = new_conv
+
+    return features

@@ -20,3 +20,21 @@ def test_get_backbone_random_init():
 def test_get_backbone_unknown_raises():
     with pytest.raises(ValueError, match="Unknown backbone"):
         get_backbone("nonexistent")
+
+
+def test_adapt_first_conv_single_channel():
+    from cosmorford.backbones import adapt_first_conv
+    features, dim = get_backbone("resnet18", pretrained=True)
+    features = adapt_first_conv(features, "resnet18")
+    x = torch.randn(1, 1, 224, 224)
+    out = features(x)
+    assert out.shape[1] == dim
+
+
+def test_adapt_first_conv_efficientnet():
+    from cosmorford.backbones import adapt_first_conv
+    features, dim = get_backbone("efficientnet_b0", pretrained=True)
+    features = adapt_first_conv(features, "efficientnet_b0")
+    x = torch.randn(1, 1, 224, 224)
+    out = features(x)
+    assert out.shape[1] == dim

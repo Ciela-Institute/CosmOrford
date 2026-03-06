@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import lightning as L
 import numpy as np
 from cosmorford import THETA_MEAN, THETA_STD, NOISE_STD, SURVEY_MASK
-from cosmorford.backbones import get_backbone
+from cosmorford.backbones import get_backbone, adapt_first_conv
 from cosmorford.dataset import reshape_field
 
 
@@ -23,8 +23,8 @@ class CompressorModel(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        features, feat_dim = get_backbone(backbone)
-        self.backbone = features
+        features, feat_dim = get_backbone(backbone, pretrained=True)
+        self.backbone = adapt_first_conv(features, backbone)
 
         # Reshaped survey mask matching the field layout after reshape_field
         self.mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
@@ -44,11 +44,9 @@ class CompressorModel(L.LightningModule):
         )
 
     def _features(self, x):
-        """Run backbone on input map, handling channel expansion."""
+        """Run backbone on input map."""
         if x.dim() == 3:
             x = x.unsqueeze(1)
-        if x.size(1) == 1:
-            x = x.repeat(1, 3, 1, 1)
         return self.pool(self.backbone(x.float()))
 
     def compress(self, x):
