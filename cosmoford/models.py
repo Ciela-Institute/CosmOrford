@@ -5,12 +5,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK, NOISE_STD
-from cosmoford.summaries import power_spectrum_batch
+from cosmoford.summaries import (power_spectrum_batch,
+                                  compute_higher_order_statistics_batch,
+                                  compute_wavelet_l1_norms_batch,
+                                  compute_scattering_batch,
+                                  scattering_n_coefficients)
 from torchvision.models.efficientnet import efficientnet_b0, efficientnet_b2, efficientnet_v2_s, efficientnet_v2_m
 
 class RegressionModel(L.LightningModule):
 
-  def __init__(self, backbone="efficientnet_b0", warmup_steps: int = 1000, max_lr: float = 0.256,
+  def __init__(self, backbone="efficientnet_b0",
+               use_cnn: bool = True,
+               use_hos: bool = False, hos_n_scales: int = 5, hos_n_bins: int = 31,
+               hos_l1_nbins: int = 40, hos_min_snr: float = -4.0, hos_max_snr: float = 8.0,
+               hos_l1_min_snr: float = -8.0, hos_l1_max_snr: float = 8.0,
+               hos_compute_mono: bool = False, hos_l1_only: bool = False,
+               use_scattering: bool = False, scattering_J: int = 5, scattering_L: int = 8,
+               warmup_steps: int = 1000, max_lr: float = 0.256,
                decay_rate: float = 0.97, decay_every_epochs: int = 2, dropout_rate: float = 0.2,
                loss_type: str = "log_prob", freeze_backbone: bool = False,
                pretrained_checkpoint_path: str = None):
@@ -23,25 +34,32 @@ class RegressionModel(L.LightningModule):
 
     self.mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
-    last_dim = 1280  # For efficientnet_b0
-    if backbone == "efficientnet_b0":
-      vision_model = efficientnet_b0()
-    elif backbone == "efficientnet_b2":
-      vision_model = efficientnet_b2()
-      last_dim = 1408
-    elif backbone == "efficientnet_v2_s":
-      vision_model = efficientnet_v2_s()
-    elif backbone == "efficientnet_v2_m":
-      vision_model = efficientnet_v2_m()
+    # CNN backbone (optional)
+    if use_cnn:
+      last_dim = 1280  # For efficientnet_b0
+      if backbone == "efficientnet_b0":
+        vision_model = efficientnet_b0()
+      elif backbone == "efficientnet_b2":
+        vision_model = efficientnet_b2()
+        last_dim = 1408
+      elif backbone == "efficientnet_v2_s":
+        vision_model = efficientnet_v2_s()
+      elif backbone == "efficientnet_v2_m":
+        vision_model = efficientnet_v2_m()
+      else:
+        raise ValueError(f"Backbone {backbone} not supported.")
+      self.model = vision_model.features
+      self.reshape_head = nn.Sequential(
+       nn.AdaptiveAvgPool2d(1),
+       nn.Flatten(),
+       nn.Dropout(p=self.hparams.dropout_rate, inplace=True),
+      )
     else:
-      raise ValueError(f"Backbone {backbone} not supported.")
+      last_dim = 0
+      self.model = None
+      self.reshape_head = None
 
-    self.model = vision_model.features
-    self.reshape_head = nn.Sequential(
-     nn.AdaptiveAvgPool2d(1),
-     nn.Flatten(),
-     nn.Dropout(p=self.hparams.dropout_rate, inplace=True),
-    )
+    # Power spectrum head (always used)
     self.ps_head = nn.Sequential(
      nn.Linear(10, 256),
      nn.LeakyReLU(),
@@ -50,10 +68,49 @@ class RegressionModel(L.LightningModule):
      nn.Linear(256, 128),
      nn.LeakyReLU()
     )
+
+    # Higher-order statistics head (optional)
+    if use_hos:
+      if hos_l1_only:
+        hos_dim = hos_n_scales * hos_l1_nbins
+      elif hos_compute_mono:
+        hos_dim = hos_n_bins + hos_n_scales * (hos_n_bins + hos_l1_nbins)
+      else:
+        hos_dim = hos_n_scales * (hos_n_bins + hos_l1_nbins)
+      self.hos_head = nn.Sequential(
+        nn.Linear(hos_dim, 512),
+        nn.LeakyReLU(),
+        nn.Linear(512, 256),
+        nn.LeakyReLU(),
+        nn.Linear(256, 128),
+        nn.LeakyReLU(),
+      )
+      hos_processed_dim = 128
+    else:
+      self.hos_head = None
+      hos_processed_dim = 0
+
+    # Scattering transform head (optional)
+    if use_scattering:
+      scat_dim = scattering_n_coefficients(scattering_J, scattering_L)
+      self.scattering_head = nn.Sequential(
+        nn.Linear(scat_dim, 512),
+        nn.LeakyReLU(),
+        nn.Linear(512, 256),
+        nn.LeakyReLU(),
+        nn.Linear(256, 128),
+        nn.LeakyReLU(),
+      )
+      scat_processed_dim = 128
+    else:
+      self.scattering_head = None
+      scat_processed_dim = 0
+
+    total_dim = last_dim + 128 + hos_processed_dim + scat_processed_dim
     self.head = nn.Sequential(
-     nn.Linear(last_dim+128, 128),
+     nn.Linear(total_dim, 128),
      nn.LeakyReLU(),
-     nn.Linear(128, 2*2) # Outputing mean and log-variance
+     nn.Linear(128, 2*2)  # mean and log-variance for (Omega_m, sigma_8)
     )
 
     # Load pretrained weights if checkpoint path is provided
@@ -66,45 +123,92 @@ class RegressionModel(L.LightningModule):
 
   def forward(self, x):
 
-    # Compute power spectrum features
+    x_orig = x  # keep for HOS/scattering (unpatched)
+
+    # Power spectrum
     with torch.no_grad():
-      _, ps_features = power_spectrum_batch(x)
-
-    # Add channel dimension if missing
-    if x.dim() == 3:
-      x = x.unsqueeze(1)
-    # Repeat channels to match expected input size (e.g., 3 for RGB)
-    if x.size(1) == 1:
-      x = x.repeat(1, 3, 1, 1)
-    # Reshape data into patches of size 88x88
-    x = F.pad(x, pad=(0, 0, 0, 14), mode='constant', value=0)
-    x = x.reshape((-1, 3, 21, 88, 88))
-    # Combine batch and patch dimensions
-    x = x.permute(0, 2, 1, 3, 4).reshape(-1, 3, 88, 88)
-
-    # If this is training, apply random rotation to each patch
-    if self.training:
-      angles = torch.randint(0, 4, (x.size(0),), device=x.device)  # Random angles: 0, 1, 2, 3
-      # Apply different rotations to different samples in the batch
-      for k in range(4):
-        mask = angles == k
-        if mask.any():
-          x[mask] = torch.rot90(x[mask], k=k, dims=(2, 3))
-
-    # Compute features
-    features = self.model(x.float())
-    # Reshape back to (batch_size, num_patches, feature_dim)
-    features = features.reshape((-1, 21, features.size(1), features.size(2), features.size(3)))
-    features = features.mean(dim=1)  # Average over patches
-    features = self.reshape_head(features)
-
-    # Combine with power spectrum features
+      _, ps_features = power_spectrum_batch(x_orig)
     ps_features = self.ps_head(ps_features)
-    features = torch.cat([features, ps_features], dim=1)
 
-    # Head to get final predictions
+    # Higher-order statistics
+    if self.hparams.use_hos:
+      with torch.no_grad():
+        if self.hparams.hos_l1_only:
+          hos_features = compute_wavelet_l1_norms_batch(
+            x_orig,
+            noise_std=NOISE_STD,
+            mask=torch.from_numpy(self.mask).to(x.device),
+            n_scales=self.hparams.hos_n_scales,
+            pixel_arcmin=2.0,
+            l1_nbins=self.hparams.hos_l1_nbins,
+            l1_min_snr=self.hparams.hos_l1_min_snr,
+            l1_max_snr=self.hparams.hos_l1_max_snr,
+            normalize=True,
+          )
+        else:
+          hos_features = compute_higher_order_statistics_batch(
+            x_orig,
+            noise_std=NOISE_STD,
+            mask=torch.from_numpy(self.mask).to(x.device),
+            n_scales=self.hparams.hos_n_scales,
+            pixel_arcmin=2.0,
+            n_bins=self.hparams.hos_n_bins,
+            l1_nbins=self.hparams.hos_l1_nbins,
+            min_snr=self.hparams.hos_min_snr,
+            max_snr=self.hparams.hos_max_snr,
+            l1_min_snr=self.hparams.hos_l1_min_snr,
+            l1_max_snr=self.hparams.hos_l1_max_snr,
+            compute_mono=self.hparams.hos_compute_mono,
+            mono_smoothing_sigma=2.0,
+            normalize=True,
+          )
+      hos_features = self.hos_head(hos_features)
+
+    # Scattering transform
+    if self.hparams.use_scattering:
+      with torch.no_grad():
+        scat_features = compute_scattering_batch(
+          x_orig,
+          J=self.hparams.scattering_J,
+          L=self.hparams.scattering_L,
+          normalize=True,
+        )
+      scat_features = self.scattering_head(scat_features)
+
+    # CNN backbone (optional)
+    if self.hparams.use_cnn:
+      if x.dim() == 3:
+        x = x.unsqueeze(1)
+      if x.size(1) == 1:
+        x = x.repeat(1, 3, 1, 1)
+      x = F.pad(x, pad=(0, 0, 0, 14), mode='constant', value=0)
+      x = x.reshape((-1, 3, 21, 88, 88))
+      x = x.permute(0, 2, 1, 3, 4).reshape(-1, 3, 88, 88)
+
+      if self.training:
+        angles = torch.randint(0, 4, (x.size(0),), device=x.device)
+        for k in range(4):
+          mask = angles == k
+          if mask.any():
+            x[mask] = torch.rot90(x[mask], k=k, dims=(2, 3))
+
+      cnn_features = self.model(x.float())
+      cnn_features = cnn_features.reshape((-1, 21, cnn_features.size(1), cnn_features.size(2), cnn_features.size(3)))
+      cnn_features = cnn_features.mean(dim=1)
+      cnn_features = self.reshape_head(cnn_features)
+
+      feature_parts = [cnn_features, ps_features]
+    else:
+      feature_parts = [ps_features]
+
+    if self.hparams.use_hos:
+      feature_parts.append(hos_features)
+    if self.hparams.use_scattering:
+      feature_parts.append(scat_features)
+
+    features = torch.cat(feature_parts, dim=1)
     x = self.head(features)
-    return x[..., :2], F.softplus(x[..., 2:]) + 0.001  # Return mean and scale
+    return x[..., :2], F.softplus(x[..., 2:]) + 0.001  # mean and scale for (Omega_m, sigma_8)
 
   def load_pretrained_weights(self, checkpoint_path: str):
     """Load weights from a pretrained checkpoint.
@@ -123,13 +227,12 @@ class RegressionModel(L.LightningModule):
     print("Pretrained weights loaded successfully!\n")
 
   def freeze_backbone_layers(self):
-    """Freeze the backbone (vision model) and power spectrum head for fine-tuning.
-    Only the final regression heads (reshape_head and head) remain trainable."""
-    for param in self.model.parameters():
-      param.requires_grad = False
+    """Freeze the CNN backbone and power spectrum head for fine-tuning."""
+    if self.model is not None:
+      for param in self.model.parameters():
+        param.requires_grad = False
     for param in self.ps_head.parameters():
       param.requires_grad = False
-    # Keep self.reshape_head and self.head trainable
     print("\nBackbone and ps_head frozen. Only reshape_head and head are trainable.")
     self.print_trainable_parameters()
 

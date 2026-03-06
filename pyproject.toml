@@ -50,7 +50,9 @@ dependencies = [
     "omegaconf",
     "wandb",
     "peft",
-    "nflows"
+    "nflows",
+    "wl_stats_torch",
+    "kymatio",
 ]
 
 [project.optional-dependencies]

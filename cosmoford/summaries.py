@@ -1,5 +1,5 @@
 """
-Power spectrum estimation utilities for batched image data.
+Power spectrum and higher-order summary statistics utilities for batched image data.
 """
 
 import torch
@@ -126,3 +126,278 @@ def power_spectrum_batch(x, pixsize=2. / 60 / 180 * np.pi, kedge=np.logspace(2, 
         power = log_power
 
     return power_k, power
+
+
+def compute_wavelet_l1_norms_batch(x, noise_std, mask=None, n_scales=5,
+                                   pixel_arcmin=2.0, l1_nbins=40,
+                                   l1_min_snr=-8.0, l1_max_snr=8.0,
+                                   normalize=True):
+    """
+    Compute ONLY wavelet L1-norms for batched convergence maps (no peak counts).
+
+    Parameters:
+    -----------
+    x : torch.Tensor
+        Input convergence maps with shape (batch, ny, nx).
+    noise_std : float or torch.Tensor
+        Noise standard deviation (scalar, (ny, nx), or (batch, ny, nx)).
+    mask : torch.Tensor, optional
+        Survey mask with shape (ny, nx); 1=valid, 0=masked.
+    n_scales : int
+        Number of wavelet scales.
+    pixel_arcmin : float
+        Pixel size in arcminutes.
+    l1_nbins : int
+        Number of bins for the L1-norm histograms.
+    l1_min_snr : float
+        Minimum SNR value for L1-norm bins.
+    l1_max_snr : float
+        Maximum SNR value for L1-norm bins.
+    normalize : bool
+        If True, apply log10(1+x) then z-score standardization.
+
+    Returns:
+    --------
+    features : torch.Tensor
+        Shape (batch, n_scales * l1_nbins).
+    """
+    try:
+        from wl_stats_torch import WLStatistics
+    except ImportError:
+        raise ImportError(
+            "wl_stats_torch package is required for higher-order statistics. "
+            "Please install it to use this functionality."
+        )
+
+    batch_size, ny, nx = x.shape
+    device = x.device
+    dtype = x.dtype
+
+    stats_computer = WLStatistics(
+        n_scales=n_scales,
+        device=device,
+        pixel_arcmin=pixel_arcmin,
+        dtype=torch.float32,
+    )
+
+    if mask is not None:
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask).to(device=device, dtype=torch.float32)
+        mask = mask.float()
+
+    if isinstance(noise_std, (int, float)):
+        sigma = float(noise_std)
+    elif torch.is_tensor(noise_std):
+        sigma = noise_std.float()
+    else:
+        sigma = float(noise_std)
+
+    stats_computer.compute_wavelet_transform(x.float(), sigma, mask=mask)
+
+    l1_bins_list, l1_norms_list = stats_computer.compute_wavelet_l1_norms(
+        n_bins=l1_nbins,
+        mask=mask,
+        min_snr=l1_min_snr,
+        max_snr=l1_max_snr,
+        clamp_overflow=False,
+    )
+
+    wavelet_l1 = torch.stack(l1_norms_list)  # (n_scales, B, l1_nbins)
+    all_features = wavelet_l1.permute(1, 0, 2).flatten(1)  # (B, n_scales*l1_nbins)
+
+    if normalize:
+        all_features = torch.log10(all_features + 1.0)
+        mean = all_features.mean(dim=0, keepdim=True)
+        std = all_features.std(dim=0, keepdim=True) + 1e-8
+        all_features = (all_features - mean) / std
+
+    return all_features.to(dtype=dtype)
+
+
+def compute_higher_order_statistics_batch(x, noise_std, mask=None, n_scales=5,
+                                          pixel_arcmin=2.0, n_bins=31, l1_nbins=40,
+                                          min_snr=-4.0, max_snr=8.0,
+                                          l1_min_snr=-8.0, l1_max_snr=8.0,
+                                          compute_mono=False, mono_smoothing_sigma=2.0,
+                                          normalize=True):
+    """
+    Compute higher-order summary statistics for batched convergence maps.
+
+    Includes multi-scale wavelet peak counts, wavelet L1-norms, and optionally
+    mono-scale (Gaussian-smoothed) peak counts.
+
+    Parameters:
+    -----------
+    x : torch.Tensor
+        Input convergence maps with shape (batch, ny, nx).
+    noise_std : float or torch.Tensor
+        Noise standard deviation (scalar, (ny, nx), or (batch, ny, nx)).
+    mask : torch.Tensor, optional
+        Survey mask with shape (ny, nx); 1=valid, 0=masked.
+    n_scales : int
+        Number of wavelet scales.
+    pixel_arcmin : float
+        Pixel size in arcminutes.
+    n_bins : int
+        Number of bins for peak count histograms.
+    l1_nbins : int
+        Number of bins for L1-norm histograms.
+    min_snr, max_snr : float
+        SNR range for peak histogram bins.
+    l1_min_snr, l1_max_snr : float
+        SNR range for L1-norm bins.
+    compute_mono : bool
+        Whether to include mono-scale peak counts.
+    mono_smoothing_sigma : float
+        Gaussian smoothing sigma (pixels) for mono-scale peaks.
+    normalize : bool
+        If True, apply log10(1+x) then z-score standardization.
+
+    Returns:
+    --------
+    features : torch.Tensor
+        Shape (batch, n_features).
+        n_features = n_scales*(n_bins+l1_nbins)  [+ n_bins if compute_mono]
+    """
+    try:
+        from wl_stats_torch import WLStatistics
+    except ImportError:
+        raise ImportError(
+            "wl_stats_torch package is required for higher-order statistics. "
+            "Please install it to use this functionality."
+        )
+
+    batch_size, ny, nx = x.shape
+    device = x.device
+    dtype = x.dtype
+
+    stats_computer = WLStatistics(
+        n_scales=n_scales,
+        device=device,
+        pixel_arcmin=pixel_arcmin,
+        dtype=torch.float32,
+    )
+
+    if mask is not None:
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask).to(device=device, dtype=torch.float32)
+        mask = mask.float()
+
+    if isinstance(noise_std, (int, float)):
+        sigma = float(noise_std)
+    elif torch.is_tensor(noise_std):
+        sigma = noise_std.float()
+    else:
+        sigma = float(noise_std)
+
+    results = stats_computer.compute_all_statistics(
+        x.float(),
+        sigma,
+        mask=mask,
+        min_snr=min_snr,
+        max_snr=max_snr,
+        n_bins=n_bins,
+        l1_nbins=l1_nbins,
+        l1_min_snr=l1_min_snr,
+        l1_max_snr=l1_max_snr,
+        compute_mono=compute_mono,
+        mono_smoothing_sigma=mono_smoothing_sigma,
+        verbose=False,
+        clamp_overflow=False,
+    )
+
+    wavelet_peaks = torch.stack(results['wavelet_peak_counts'])  # (n_scales, B, n_bins)
+    wavelet_l1 = torch.stack(results['wavelet_l1_norms'])        # (n_scales, B, l1_nbins)
+
+    if compute_mono:
+        mono_peaks = results['mono_peak_counts']  # (B, n_bins)
+        all_features = torch.cat([
+            mono_peaks,
+            wavelet_peaks.permute(1, 0, 2).flatten(1),
+            wavelet_l1.permute(1, 0, 2).flatten(1),
+        ], dim=1)
+    else:
+        all_features = torch.cat([
+            wavelet_peaks.permute(1, 0, 2).flatten(1),
+            wavelet_l1.permute(1, 0, 2).flatten(1),
+        ], dim=1)
+
+    if normalize:
+        all_features = torch.log10(all_features + 1.0)
+        mean = all_features.mean(dim=0, keepdim=True)
+        std = all_features.std(dim=0, keepdim=True) + 1e-8
+        all_features = (all_features - mean) / std
+
+    return all_features.to(dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# Wavelet Scattering Transform
+# ---------------------------------------------------------------------------
+
+_scattering_cache: dict = {}
+
+
+def _get_scattering_obj(J: int, L: int, H: int, W: int, device: torch.device):
+    """Return a cached kymatio Scattering2D instance."""
+    key = (J, L, H, W, str(device))
+    if key not in _scattering_cache:
+        from kymatio.torch import Scattering2D
+        S = Scattering2D(J=J, L=L, shape=(H, W))
+        S = S.to(device)
+        _scattering_cache[key] = S
+    return _scattering_cache[key]
+
+
+def scattering_n_coefficients(J: int, L: int) -> int:
+    """Number of scattering coefficients for orders 0, 1, and 2.
+
+    K = 1 (order 0) + J*L (order 1) + L^2 * J*(J-1)/2 (order 2)
+    """
+    return 1 + L * J + L * L * J * (J - 1) // 2
+
+
+def compute_scattering_batch(x, J=5, L=8, normalize=True):
+    """
+    Compute 2D wavelet scattering transform coefficients for batched maps.
+
+    Uses the kymatio library (PyTorch frontend). The scattering object is cached
+    so wavelet filters are only built once per (J, L, H, W, device) combination.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input maps with shape (batch, ny, nx).
+    J : int
+        Maximum wavelet scale (must satisfy 2**J <= min(ny, nx)).
+    L : int
+        Number of angular orientations.
+    normalize : bool
+        If True, apply log1p then per-batch z-score standardization.
+
+    Returns
+    -------
+    features : torch.Tensor
+        Shape (batch, K) where K = 1 + L*J + L**2 * J*(J-1)//2.
+    """
+    assert x.ndim == 3, f"Expected 3D input (batch, ny, nx), got shape {x.shape}"
+    batch_size, ny, nx = x.shape
+    device = x.device
+    dtype = x.dtype
+
+    assert 2 ** J <= min(ny, nx), (
+        f"J={J} too large for map size ({ny}, {nx}): need 2**J={2**J} <= {min(ny, nx)}"
+    )
+
+    x_in = x.unsqueeze(1).float()  # (B, 1, ny, nx)
+    scattering = _get_scattering_obj(J, L, ny, nx, device)
+    Sx = scattering(x_in)          # (B, 1, K, h, w)
+    features = Sx.mean(dim=(-2, -1)).squeeze(1)  # (B, K)
+
+    if normalize:
+        features = torch.log1p(features)
+        mean = features.mean(dim=0, keepdim=True)
+        std = features.std(dim=0, keepdim=True) + 1e-8
+        features = (features - mean) / std
+
+    return features.to(dtype=dtype)
