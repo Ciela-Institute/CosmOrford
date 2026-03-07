@@ -26,6 +26,7 @@ image = (
         "pyyaml",
         "jsonargparse[signatures,omegaconf]>=4.27.7",
         "peft",
+        "nflows",
         "matplotlib",
         "scikit-learn",
     )

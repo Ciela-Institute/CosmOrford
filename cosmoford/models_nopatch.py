@@ -39,6 +39,7 @@ class RegressionModelNoPatch(L.LightningModule):
                use_flow: bool = False, flow_transforms: int = 4, flow_hidden_dim: int = 64,
                pretrained_checkpoint_path: str = None,
                pretrained: bool = False, lr_schedule: str = "step",
+               total_steps: int = 0,
                n_val_noise: int = 1,
                use_peft: bool = False, lora_r: int = 8, lora_alpha: int = 16,
                lora_dropout: float = 0.1, lora_target_modules: list = None):
@@ -139,6 +140,7 @@ class RegressionModelNoPatch(L.LightningModule):
       'flow_hidden_dim': flow_hidden_dim,
       'pretrained': pretrained,
       'lr_schedule': lr_schedule,
+      'total_steps': total_steps,
       'n_val_noise': n_val_noise,
       'use_peft': use_peft,
       'lora_r': lora_r,
@@ -383,8 +385,11 @@ class RegressionModelNoPatch(L.LightningModule):
   def configure_optimizers(self):
     optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.max_lr, weight_decay=1e-5)
 
-    # Calculate total steps
-    total_steps = int(self.trainer.estimated_stepping_batches)
+    # Use fixed total_steps if provided, otherwise derive from trainer
+    if self.hparams.total_steps > 0:
+      total_steps = self.hparams.total_steps
+    else:
+      total_steps = int(self.trainer.estimated_stepping_batches)
     warmup_steps = self.hparams.warmup_steps
 
     # Linear warmup from 0 to max_lr
