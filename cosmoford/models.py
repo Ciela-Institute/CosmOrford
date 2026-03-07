@@ -253,12 +253,15 @@ class RegressionModel(L.LightningModule):
   def training_step(self, batch, batch_idx):
     x, y = batch
 
-    # Adding noise to the input convergence maps and applying mask
+    # Adding noise to the input convergence maps
     noise = torch.randn_like(x) * NOISE_STD
     x = x + noise
-    x = x * torch.tensor(self.mask, device=x.device).unsqueeze(0)
 
-    # Adding augmentations, random left-right and up-down flips (per sample)
+    # Adding augmentations BEFORE masking so that the survey mask always covers
+    # the same region of the map.  Applying augmentations after masking shifts
+    # the zero-filled masked pixels to random positions, which creates spurious
+    # mask-boundary features in the scattering transform (and any other
+    # summary statistic that does not take an explicit mask argument).
     batch_size = x.size(0)
     # Random flips along nx dimension (dim=1)
     flip_lr = torch.rand(batch_size, device=x.device) < 0.5
@@ -267,11 +270,15 @@ class RegressionModel(L.LightningModule):
     flip_ud = torch.rand(batch_size, device=x.device) < 0.5
     x[flip_ud] = torch.flip(x[flip_ud], dims=[2])
 
-    # Adding random cyclic shifts (different for each sample) in nx and ny
+    # Random cyclic shifts (different for each sample) in nx and ny
     shift_x = torch.randint(low=0, high=x.size(1), size=(batch_size,), device=x.device)
     x = torch.stack([torch.roll(x[i], shifts=(shift_x[i].item(),), dims=(0,)) for i in range(batch_size)])
     shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
     x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
+
+    # Apply mask after augmentation so the survey footprint is always at the
+    # same location in the (augmented) map.
+    x = x * torch.tensor(self.mask, device=x.device).unsqueeze(0)
 
     mean, std = self(x)
 

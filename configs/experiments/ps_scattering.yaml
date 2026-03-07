@@ -28,7 +28,7 @@ trainer:
     - class_path: LearningRateMonitor
       init_args:
         logging_interval: "step"
-    - class_path: EMAWeightAveraging
+    - class_path: cosmoford.trainer.EMAWeightAveraging
     - class_path: ModelCheckpoint
       init_args:
         monitor: "val_score"
@@ -38,7 +38,7 @@ trainer:
   logger:
     class_path: WandbLogger
     init_args:
-      name: "ps_scattering"
+      name: "ps_scattering_v2"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
       log_model: true
