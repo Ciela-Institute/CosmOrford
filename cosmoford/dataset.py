@@ -1,6 +1,6 @@
 import torch
 import lightning as L
-from datasets import load_dataset, concatenate_datasets, Dataset
+from datasets import load_from_disk, concatenate_datasets, Dataset
 from torch.utils.data import DataLoader
 from cosmoford import THETA_MEAN, THETA_STD
 import numpy as np
@@ -69,6 +69,9 @@ def inverse_reshape_field_numpy(kappa_reduced, fill_value: float = 0.0):
 
 
 class ChallengeDataModule(L.LightningDataModule):
+    # Local path where the simulation datasets are stored on Rorqual
+    _LOCAL_DATA_DIR = "/project/6061843/shared/wl_chall_data"
+
     def __init__(self, batch_size=64, num_workers=8, train_on_full_data=False, dataset_mode="train"):
         """
         Args:
@@ -100,8 +103,8 @@ class ChallengeDataModule(L.LightningDataModule):
         return kappa, theta
 
     def setup(self, stage=None):
-        # Load the main dataset
-        dset = load_dataset("cosmostat/neurips-wl-challenge-flat")
+        # Load the main dataset from local disk
+        dset = load_from_disk(f"{self._LOCAL_DATA_DIR}/neurips-wl-challenge-flat")
         dset = dset.with_format("torch")
 
         # Determine which dataset to use for training
