@@ -1,8 +1,10 @@
 model:
   class_path: cosmoford.models.RegressionModel
   init_args:
-    backbone: "efficientnet_b0"
-    use_cnn: true
+    use_cnn: false
+    use_scattering: true
+    scattering_J: 5
+    scattering_L: 8
     use_hos: true
     hos_n_scales: 6
     hos_n_bins: 51
@@ -14,7 +16,7 @@ model:
     hos_compute_mono: false
     hos_l1_only: false
     warmup_steps: 500
-    max_lr: 0.001
+    max_lr: 0.002
     decay_rate: 0.85
     decay_every_epochs: 1
     dropout_rate: 0.2
@@ -23,7 +25,7 @@ model:
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
-    batch_size: 64
+    batch_size: 256
     num_workers: 12
 
 trainer:
@@ -46,7 +48,7 @@ trainer:
   logger:
     class_path: WandbLogger
     init_args:
-      name: "ps_hos_cnn"
+      name: "ps_scattering_J5_hos"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
       log_model: true

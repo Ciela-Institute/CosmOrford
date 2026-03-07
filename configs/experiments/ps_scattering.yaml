@@ -3,7 +3,7 @@ model:
   init_args:
     use_cnn: false
     use_scattering: true
-    scattering_J: 5
+    scattering_J: 4
     scattering_L: 8
     warmup_steps: 500
     max_lr: 0.002
@@ -38,7 +38,7 @@ trainer:
   logger:
     class_path: WandbLogger
     init_args:
-      name: "ps_scattering_v2"
+      name: "ps_scattering_J4"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
       log_model: true
