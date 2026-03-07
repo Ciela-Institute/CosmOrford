@@ -91,11 +91,12 @@ def train_budget(config_path: str, experiment_name: str, cli_overrides: list):
     ]
     cmd.extend(cli_overrides)
 
-    if last_ckpt.exists():
-        print(f"Resuming from checkpoint: {last_ckpt}")
-        cmd.append(f"--ckpt_path={last_ckpt}")
-    else:
-        print("Starting training from scratch")
+    # Always start fresh for budget scan (clear old checkpoints)
+    import shutil
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    print("Starting training from scratch")
 
     subprocess.run(cmd, check=True, cwd="/root")
     volume.commit()
