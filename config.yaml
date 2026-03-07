@@ -1,0 +1,133 @@
+# lightning.pytorch==2.6.0.dev20251019
+seed_everything: 0
+trainer:
+  accelerator: gpu
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: 16-mixed
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      name: test-efficientnet_v2_s_ngll
+      save_dir: .
+      version: null
+      offline: false
+      dir: null
+      id: null
+      anonymous: null
+      project: neurips-wl-challenge
+      log_model: true
+      experiment: null
+      prefix: ''
+      checkpoint_name: null
+      add_file_policy: mutable
+      entity: cosmostat
+      notes: null
+      tags: null
+      config: null
+      config_exclude_keys: null
+      config_include_keys: null
+      allow_val_change: null
+      group: null
+      job_type: null
+      mode: null
+      force: null
+      reinit: null
+      resume: null
+      resume_from: null
+      fork_from: null
+      save_code: null
+      tensorboard: null
+      sync_tensorboard: null
+      monitor_gym: null
+      settings: null
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+      log_momentum: false
+      log_weight_decay: false
+  - class_path: cosmoford.trainer.EMAWeightAveraging
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: null
+      filename: null
+      monitor: val_score
+      verbose: false
+      save_last: true
+      save_top_k: 3
+      save_on_exception: false
+      save_weights_only: false
+      mode: max
+      auto_insert_metric_name: true
+      every_n_train_steps: null
+      train_time_interval: null
+      every_n_epochs: null
+      save_on_train_epoch_end: null
+      enable_version_counter: true
+  fast_dev_run: false
+  max_epochs: 30
+  min_epochs: null
+  max_steps: -1
+  min_steps: null
+  max_time: null
+  limit_train_batches: null
+  limit_val_batches: null
+  limit_test_batches: null
+  limit_predict_batches: null
+  overfit_batches: 0.0
+  val_check_interval: null
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: null
+  log_every_n_steps: 1
+  enable_checkpointing: null
+  enable_progress_bar: null
+  enable_model_summary: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  deterministic: null
+  benchmark: null
+  inference_mode: true
+  use_distributed_sampler: true
+  profiler: null
+  detect_anomaly: false
+  barebones: false
+  plugins: null
+  sync_batchnorm: false
+  reload_dataloaders_every_n_epochs: 0
+  default_root_dir: null
+  enable_autolog_hparams: true
+  model_registry: null
+model:
+  class_path: cosmoford.models_nopatch.RegressionModelNoPatch
+  init_args:
+    backbone: efficientnet_v2_s
+    summary_dim: 8
+    warmup_steps: 500
+    max_lr: 0.008
+    decay_rate: 0.85
+    decay_every_epochs: 1
+    dropout_rate: 0.2
+    loss_type: log_prob
+    freeze_backbone: false
+    use_flow: false
+    flow_transforms: 4
+    flow_hidden_dim: 64
+    pretrained_checkpoint_path: null
+    use_peft: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.1
+    lora_target_modules: null
+data:
+  class_path: cosmoford.dataset.ChallengeDataModule
+  init_args:
+    batch_size: 128
+    num_workers: 12
+    train_on_full_data: false
+    dataset_mode: train
+optimizer: null
+lr_scheduler: null
+ckpt_path: null
