@@ -363,6 +363,7 @@ step = 0
 best_val_loss = float('inf')
 patience_counter = 0
 stop_training = False
+patience = args.patience
 
 for epoch in tqdm(range(num_epochs)):
     ds_train_logn = get_iterable_dataset(train_dataset_lognormal, batch_size, int((epoch + 1) * 1000))
@@ -409,7 +410,7 @@ for epoch in tqdm(range(num_epochs)):
                     "epoch": epoch
                 })
 
-                if args.patience > 0:
+                if patience > 0:
                     if loss_t < best_val_loss:
                         best_val_loss = loss_t
                         patience_counter = 0
@@ -418,8 +419,8 @@ for epoch in tqdm(range(num_epochs)):
                     else:
                         patience_counter += 1
                     wandb.log({"patience_counter": patience_counter, "best_val_loss": best_val_loss})
-                    if patience_counter >= args.patience:
-                        print(f"Early stopping at epoch {epoch}, step {step} (best val_loss={best_val_loss:.6f})")
+                    if patience_counter >= patience:
+                        print(f"Early stopping triggered at epoch {epoch}, step {step} (best val_loss={best_val_loss:.6f})")
                         stop_training = True
                         break
 
