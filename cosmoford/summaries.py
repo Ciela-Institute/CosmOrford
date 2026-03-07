@@ -128,6 +128,92 @@ def power_spectrum_batch(x, pixsize=2. / 60 / 180 * np.pi, kedge=np.logspace(2, 
     return power_k, power
 
 
+def compute_wavelet_peaks_batch(x, noise_std, mask=None, n_scales=5,
+                                pixel_arcmin=2.0, n_bins=31,
+                                min_snr=-4.0, max_snr=8.0,
+                                normalize=True):
+    """
+    Compute ONLY wavelet peak counts for batched convergence maps (no L1-norms).
+
+    Parameters:
+    -----------
+    x : torch.Tensor
+        Input convergence maps with shape (batch, ny, nx).
+    noise_std : float or torch.Tensor
+        Noise standard deviation (scalar, (ny, nx), or (batch, ny, nx)).
+    mask : torch.Tensor, optional
+        Survey mask with shape (ny, nx); 1=valid, 0=masked.
+    n_scales : int
+        Number of wavelet scales.
+    pixel_arcmin : float
+        Pixel size in arcminutes.
+    n_bins : int
+        Number of bins for the peak count histograms.
+    min_snr : float
+        Minimum SNR value for peak histogram bins.
+    max_snr : float
+        Maximum SNR value for peak histogram bins.
+    normalize : bool
+        If True, apply log10(1+x) then z-score standardization.
+
+    Returns:
+    --------
+    features : torch.Tensor
+        Shape (batch, n_scales * n_bins).
+    """
+    try:
+        from wl_stats_torch import WLStatistics
+    except ImportError:
+        raise ImportError(
+            "wl_stats_torch package is required for higher-order statistics. "
+            "Please install it to use this functionality."
+        )
+
+    batch_size, ny, nx = x.shape
+    device = x.device
+    dtype = x.dtype
+
+    stats_computer = WLStatistics(
+        n_scales=n_scales,
+        device=device,
+        pixel_arcmin=pixel_arcmin,
+        dtype=torch.float32,
+    )
+
+    if mask is not None:
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask).to(device=device, dtype=torch.float32)
+        mask = mask.float()
+
+    if isinstance(noise_std, (int, float)):
+        sigma = float(noise_std)
+    elif torch.is_tensor(noise_std):
+        sigma = noise_std.float()
+    else:
+        sigma = float(noise_std)
+
+    stats_computer.compute_wavelet_transform(x.float(), sigma, mask=mask)
+
+    _, peaks_list = stats_computer.compute_wavelet_peak_counts(
+        n_bins=n_bins,
+        mask=mask,
+        min_snr=min_snr,
+        max_snr=max_snr,
+        clamp_overflow=False,
+    )
+
+    wavelet_peaks = torch.stack(peaks_list)  # (n_scales, B, n_bins)
+    all_features = wavelet_peaks.permute(1, 0, 2).flatten(1)  # (B, n_scales*n_bins)
+
+    if normalize:
+        all_features = torch.log10(all_features + 1.0)
+        mean = all_features.mean(dim=0, keepdim=True)
+        std = all_features.std(dim=0, keepdim=True) + 1e-8
+        all_features = (all_features - mean) / std
+
+    return all_features.to(dtype=dtype)
+
+
 def compute_wavelet_l1_norms_batch(x, noise_std, mask=None, n_scales=5,
                                    pixel_arcmin=2.0, l1_nbins=40,
                                    l1_min_snr=-8.0, l1_max_snr=8.0,

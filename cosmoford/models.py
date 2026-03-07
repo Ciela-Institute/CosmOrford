@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK, NOISE_STD
 from cosmoford.summaries import (power_spectrum_batch,
+                                  compute_wavelet_peaks_batch,
                                   compute_higher_order_statistics_batch,
                                   compute_wavelet_l1_norms_batch,
                                   compute_scattering_batch,
@@ -16,10 +17,12 @@ class RegressionModel(L.LightningModule):
 
   def __init__(self, backbone="efficientnet_b0",
                use_cnn: bool = True,
+               use_ps: bool = True,
                use_hos: bool = False, hos_n_scales: int = 5, hos_n_bins: int = 31,
                hos_l1_nbins: int = 40, hos_min_snr: float = -4.0, hos_max_snr: float = 8.0,
                hos_l1_min_snr: float = -8.0, hos_l1_max_snr: float = 8.0,
                hos_compute_mono: bool = False, hos_l1_only: bool = False,
+               hos_peaks_only: bool = False,
                use_scattering: bool = False, scattering_J: int = 5, scattering_L: int = 8,
                warmup_steps: int = 1000, max_lr: float = 0.256,
                decay_rate: float = 0.97, decay_every_epochs: int = 2, dropout_rate: float = 0.2,
@@ -59,20 +62,27 @@ class RegressionModel(L.LightningModule):
       self.model = None
       self.reshape_head = None
 
-    # Power spectrum head (always used)
-    self.ps_head = nn.Sequential(
-     nn.Linear(10, 256),
-     nn.LeakyReLU(),
-     nn.Linear(256, 256),
-     nn.LeakyReLU(),
-     nn.Linear(256, 128),
-     nn.LeakyReLU()
-    )
+    # Power spectrum head (optional; disabled when use_ps=False for ablation studies)
+    if use_ps:
+      self.ps_head = nn.Sequential(
+       nn.Linear(10, 256),
+       nn.LeakyReLU(),
+       nn.Linear(256, 256),
+       nn.LeakyReLU(),
+       nn.Linear(256, 128),
+       nn.LeakyReLU()
+      )
+      ps_processed_dim = 128
+    else:
+      self.ps_head = None
+      ps_processed_dim = 0
 
     # Higher-order statistics head (optional)
     if use_hos:
       if hos_l1_only:
         hos_dim = hos_n_scales * hos_l1_nbins
+      elif hos_peaks_only:
+        hos_dim = hos_n_scales * hos_n_bins
       elif hos_compute_mono:
         hos_dim = hos_n_bins + hos_n_scales * (hos_n_bins + hos_l1_nbins)
       else:
@@ -106,7 +116,11 @@ class RegressionModel(L.LightningModule):
       self.scattering_head = None
       scat_processed_dim = 0
 
-    total_dim = last_dim + 128 + hos_processed_dim + scat_processed_dim
+    total_dim = last_dim + ps_processed_dim + hos_processed_dim + scat_processed_dim
+    if total_dim == 0:
+      raise ValueError(
+        "At least one of use_cnn, use_ps, use_hos, or use_scattering must be enabled."
+      )
     self.head = nn.Sequential(
      nn.Linear(total_dim, 128),
      nn.LeakyReLU(),
@@ -126,9 +140,10 @@ class RegressionModel(L.LightningModule):
     x_orig = x  # keep for HOS/scattering (unpatched)
 
     # Power spectrum
-    with torch.no_grad():
-      _, ps_features = power_spectrum_batch(x_orig)
-    ps_features = self.ps_head(ps_features)
+    if self.hparams.use_ps:
+      with torch.no_grad():
+        _, ps_features = power_spectrum_batch(x_orig)
+      ps_features = self.ps_head(ps_features)
 
     # Higher-order statistics
     if self.hparams.use_hos:
@@ -143,6 +158,18 @@ class RegressionModel(L.LightningModule):
             l1_nbins=self.hparams.hos_l1_nbins,
             l1_min_snr=self.hparams.hos_l1_min_snr,
             l1_max_snr=self.hparams.hos_l1_max_snr,
+            normalize=True,
+          )
+        elif self.hparams.hos_peaks_only:
+          hos_features = compute_wavelet_peaks_batch(
+            x_orig,
+            noise_std=NOISE_STD,
+            mask=torch.from_numpy(self.mask).to(x.device),
+            n_scales=self.hparams.hos_n_scales,
+            pixel_arcmin=2.0,
+            n_bins=self.hparams.hos_n_bins,
+            min_snr=self.hparams.hos_min_snr,
+            max_snr=self.hparams.hos_max_snr,
             normalize=True,
           )
         else:
@@ -197,9 +224,11 @@ class RegressionModel(L.LightningModule):
       cnn_features = cnn_features.mean(dim=1)
       cnn_features = self.reshape_head(cnn_features)
 
-      feature_parts = [cnn_features, ps_features]
+      feature_parts = [cnn_features]
+      if self.hparams.use_ps:
+        feature_parts.append(ps_features)
     else:
-      feature_parts = [ps_features]
+      feature_parts = [ps_features] if self.hparams.use_ps else []
 
     if self.hparams.use_hos:
       feature_parts.append(hos_features)
