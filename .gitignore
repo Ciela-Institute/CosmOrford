@@ -219,4 +219,4 @@ __marimo__/
 neurips-wl-challenge/
 uv*
 wandb/
-shell/
+# shell/

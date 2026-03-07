@@ -7,7 +7,7 @@ name = "cosmoford"
 dynamic = ["version"]
 description = "Repository for the NeurIPS Weak Lensing Challenge"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {file = "LICENSE"}
 authors = [
     {name = "Francois Lanusse", email = "francois.lanusse@cnrs.fr"}

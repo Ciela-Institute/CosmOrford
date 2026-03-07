@@ -41,7 +41,7 @@ VOLUME_PATH = Path("/experiments")
 CHECKPOINTS_PATH = VOLUME_PATH / "checkpoints"
 
 BUDGETS = [100, 200, 500, 1000, 2000, 5000, 10000, 20200]
-BASE_CONFIG = "configs/experiments/resnet18.yaml"
+BASE_CONFIG = "configs/experiments/efficientnet_v2_s_ngll.yaml"
 
 
 @app.function(
@@ -105,6 +105,7 @@ def train_budget(config_path: str, experiment_name: str, cli_overrides: list):
 @app.local_entrypoint()
 def main():
     handles = []
+    print("Running script...")
     for n in BUDGETS:
         name = f"budget-{n}"
         overrides = [
@@ -119,3 +120,5 @@ def main():
     for h in handles:
         h.get()
     print("All budget scan runs completed.")
+
+
