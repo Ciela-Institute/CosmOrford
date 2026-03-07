@@ -46,9 +46,13 @@ mkdir -p jobout
 export WANDB_MODE=offline
 
 # ── Run training ──────────────────────────────────────────────────────────────
+# Disable tqdm progress bar (uses \r overwrites that corrupt log files) and
+# inject EpochProgressPrinter which emits one clean line per epoch instead.
 trainer fit \
     --config "$CONFIG" \
-    --trainer.devices=1
+    --trainer.devices=1 \
+    --trainer.enable_progress_bar=false \
+    "--trainer.callbacks+={class_path: cosmoford.trainer.EpochProgressPrinter}"
 
 echo ""
 echo "======================================================================"
