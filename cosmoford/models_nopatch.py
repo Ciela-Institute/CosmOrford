@@ -8,6 +8,26 @@ from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK, NOISE_STD
 from cosmoford.summaries import power_spectrum_batch
 from torchvision.models.efficientnet import efficientnet_b0, efficientnet_b2, efficientnet_v2_s, efficientnet_v2_m
 from peft import LoraConfig, get_peft_model
+from nflows.flows import Flow
+from nflows.distributions import StandardNormal
+from nflows.transforms import CompositeTransform, MaskedAffineAutoregressiveTransform, RandomPermutation
+
+
+def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64):
+  """Build a small conditional MAF: p(params | summaries)."""
+  transforms = []
+  for _ in range(n_transforms):
+    transforms.append(RandomPermutation(features=param_dim))
+    transforms.append(MaskedAffineAutoregressiveTransform(
+      features=param_dim,
+      hidden_features=hidden_dim,
+      context_features=context_dim,
+    ))
+  return Flow(
+    transform=CompositeTransform(transforms),
+    distribution=StandardNormal([param_dim]),
+  )
+
 
 class RegressionModelNoPatch(L.LightningModule):
 
@@ -15,6 +35,7 @@ class RegressionModelNoPatch(L.LightningModule):
                warmup_steps: int = 1000, max_lr: float = 0.256,
                decay_rate: float = 0.97, decay_every_epochs: int = 2, dropout_rate: float = 0.2,
                freeze_backbone: bool = False,
+               use_flow: bool = False, flow_transforms: int = 4, flow_hidden_dim: int = 64,
                pretrained_checkpoint_path: str = None,
                use_peft: bool = False, lora_r: int = 8, lora_alpha: int = 16,
                lora_dropout: float = 0.1, lora_target_modules: list = None):
@@ -95,6 +116,9 @@ class RegressionModelNoPatch(L.LightningModule):
       'dropout_rate': dropout_rate,
       'summary_dim': summary_dim,
       'freeze_backbone': freeze_backbone,
+      'use_flow': use_flow,
+      'flow_transforms': flow_transforms,
+      'flow_hidden_dim': flow_hidden_dim,
       'use_peft': use_peft,
       'lora_r': lora_r,
       'lora_alpha': lora_alpha,
@@ -108,6 +132,9 @@ class RegressionModelNoPatch(L.LightningModule):
      nn.Dropout(p=self.hparams.dropout_rate, inplace=True),
     )
     self.compressor = nn.Linear(last_dim, summary_dim)
+    if use_flow:
+      self.flow = build_flow(param_dim=2, context_dim=summary_dim,
+                             n_transforms=flow_transforms, hidden_dim=flow_hidden_dim)
     self.head = nn.Sequential(
      nn.GELU(),
      nn.Linear(summary_dim, summary_dim * 4),
@@ -241,9 +268,12 @@ class RegressionModelNoPatch(L.LightningModule):
     shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
     x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
 
-    mean, std, _ = self(x)
+    mean, std, summaries = self(x)
 
-    loss = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+    if self.hparams.use_flow:
+      loss = -self.flow.log_prob(y, context=summaries).mean()
+    else:
+      loss = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
     self.log('train_loss', loss)
     return loss
 
@@ -255,7 +285,12 @@ class RegressionModelNoPatch(L.LightningModule):
     x = x + noise
     x = x * torch.tensor(self.mask, device=x.device).unsqueeze(0)
 
-    mean, std, _ = self(x)
+    mean, std, summaries = self(x)
+
+    if self.hparams.use_flow:
+      nll = -self.flow.log_prob(y, context=summaries).mean()
+      self.log('val_nll', nll, prog_bar=True)
+      return nll
 
     # Rescaling back to original parameters
     mean = mean * torch.tensor(THETA_STD[:2], device=mean.device) + torch.tensor(THETA_MEAN[:2], device=mean.device)
