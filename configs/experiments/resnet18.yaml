@@ -10,7 +10,7 @@ model:
     dropout_rate: 0.2
     lr_schedule: "cosine"
     n_val_noise: 8
-    loss_type: "score"
+    loss_type: "log_prob"
 
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
