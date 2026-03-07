@@ -43,8 +43,8 @@ CHECKPOINTS_PATH = VOLUME_PATH / "checkpoints"
     single_use_containers=True,
     secrets=[modal.Secret.from_name("wandb-secret")],
 )
-def train(config_path: str, experiment_name: Optional[str] = None):
-    _train_impl(config_path, experiment_name)
+def train(config_path: str, experiment_name: Optional[str] = None, cli_overrides: Optional[list] = None):
+    _train_impl(config_path, experiment_name, cli_overrides)
 
 
 @app.function(
@@ -55,11 +55,11 @@ def train(config_path: str, experiment_name: Optional[str] = None):
     single_use_containers=True,
     secrets=[modal.Secret.from_name("wandb-secret")],
 )
-def train_a100(config_path: str, experiment_name: Optional[str] = None):
-    _train_impl(config_path, experiment_name)
+def train_a100(config_path: str, experiment_name: Optional[str] = None, cli_overrides: Optional[list] = None):
+    _train_impl(config_path, experiment_name, cli_overrides)
 
 
-def _train_impl(config_path: str, experiment_name: Optional[str] = None):
+def _train_impl(config_path: str, experiment_name: Optional[str] = None, cli_overrides: Optional[list] = None):
     import subprocess
     import yaml
 
@@ -97,6 +97,9 @@ def _train_impl(config_path: str, experiment_name: Optional[str] = None):
         f"--config=/root/{config_path}",
         f"--config={overlay_path}",
     ]
+
+    if cli_overrides:
+        cmd.extend(cli_overrides)
 
     if last_ckpt.exists():
         print(f"Resuming from checkpoint: {last_ckpt}")

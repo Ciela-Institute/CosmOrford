@@ -69,7 +69,8 @@ def inverse_reshape_field_numpy(kappa_reduced, fill_value: float = 0.0):
 
 
 class ChallengeDataModule(L.LightningDataModule):
-    def __init__(self, batch_size=64, num_workers=8, train_on_full_data=False, dataset_mode="train"):
+    def __init__(self, batch_size=64, num_workers=8, train_on_full_data=False, dataset_mode="train",
+                 max_train_samples: int = 0):
         """
         Args:
             batch_size: Batch size for dataloaders
@@ -79,12 +80,14 @@ class ChallengeDataModule(L.LightningDataModule):
                 - "lognormal": Use lognormal pretraining dataset
                 - "train": Use the regular training set from neurips-wl-challenge-flat
                 - "full": Use train + validation concatenated
+            max_train_samples: If > 0, limit training set to this many samples
         """
         super().__init__()
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.train_on_full_data = train_on_full_data
         self.dataset_mode = dataset_mode
+        self.max_train_samples = max_train_samples
 
     def _collate_fn(self, batch):
         # Run the default collate function
@@ -158,6 +161,12 @@ class ChallengeDataModule(L.LightningDataModule):
             self.val_dataset = dset['validation']
         else:
             raise ValueError(f"Unknown dataset_mode: {self.dataset_mode}. Must be 'lognormal', 'train', or 'full'.")
+
+        # Limit training set size if requested
+        if self.max_train_samples > 0 and len(self.train_dataset) > self.max_train_samples:
+            full_size = len(self.train_dataset)
+            self.train_dataset = self.train_dataset.select(range(self.max_train_samples))
+            print(f"Training set limited to {self.max_train_samples} samples (from {full_size})")
 
     def train_dataloader(self):
         return DataLoader(
