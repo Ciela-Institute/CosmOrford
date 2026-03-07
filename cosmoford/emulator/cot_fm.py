@@ -72,6 +72,7 @@ parser.add_argument("--ot_reg", type=float, default=0.05, help="Sinkhorn regular
 parser.add_argument("--dataset_dir_nbody", type=str, default=None, help="Path to local neurips-wl-challenge-flat DatasetDict (load_from_disk); falls back to HF Hub if not set")
 parser.add_argument("--dataset_dir_logn_train", type=str, default=None, help="Path to lognormal training dataset")
 parser.add_argument("--dataset_dir_logn_val", type=str, default=None, help="Path to lognormal validation dataset")
+parser.add_argument("--patience", type=int, default=10, help="Early stopping: number of val evaluations without improvement before stopping (0 to disable)")
 
 args = parser.parse_args()
 
@@ -358,7 +359,11 @@ micro_bs = int(args.micro_batch_size)
 min_dataset_size = min(len(train_dataset_lognormal), len(train_dataset_nbody))
 num_training_steps_total = (min_dataset_size // micro_bs) * num_epochs
 nb_checkpoints = num_training_steps_total // 10
-step = 0 
+step = 0
+best_val_loss = float('inf')
+patience_counter = 0
+stop_training = False
+patience = args.patience
 
 for epoch in tqdm(range(num_epochs)):
     ds_train_logn = get_iterable_dataset(train_dataset_lognormal, batch_size, int((epoch + 1) * 1000))
@@ -404,6 +409,20 @@ for epoch in tqdm(range(num_epochs)):
                     "train_loss_epoch": float(loss),
                     "epoch": epoch
                 })
+
+                if patience > 0:
+                    if loss_t < best_val_loss:
+                        best_val_loss = loss_t
+                        patience_counter = 0
+                        best_ckpt = str(ckpt_dir / "unet_best.pth")
+                        torch.save(unet.state_dict(), best_ckpt)
+                    else:
+                        patience_counter += 1
+                    wandb.log({"patience_counter": patience_counter, "best_val_loss": best_val_loss})
+                    if patience_counter >= patience:
+                        print(f"Early stopping triggered at epoch {epoch}, step {step} (best val_loss={best_val_loss:.6f})")
+                        stop_training = True
+                        break
 
             if step % nb_checkpoints == 0:
                 # Save and log checkpoint to wandb as an artifact
@@ -478,6 +497,12 @@ for epoch in tqdm(range(num_epochs)):
                 except Exception:
                     pass
                 plt.close(fig)
+
+        if stop_training:
+            break
+
+    if stop_training:
+        break
 
 # Final trained model
 try:
