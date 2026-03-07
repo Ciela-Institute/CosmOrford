@@ -37,9 +37,9 @@ trainer:
         save_last: true
     - class_path: EarlyStopping
       init_args:
-        monitor: "val_score"
+        monitor: "val_mse"
         patience: 10
-        mode: "max"
+        mode: "min"
   logger:
     class_path: WandbLogger
     init_args:

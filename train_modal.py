@@ -80,8 +80,8 @@ def _train_impl(config_path: str, experiment_name: Optional[str] = None, cli_ove
                     "class_path": "ModelCheckpoint",
                     "init_args": {
                         "dirpath": str(checkpoint_dir),
-                        "monitor": "val_score",
-                        "mode": "max",
+                        "monitor": "val_mse",
+                        "mode": "min",
                         "save_top_k": 3,
                         "save_last": True,
                     },
