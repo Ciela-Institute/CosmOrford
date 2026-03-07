@@ -2,7 +2,7 @@ model:
   class_path: cosmoford.models_nopatch.RegressionModelNoPatch
   init_args:
     backbone: "resnet18"
-    bottleneck_dim: 8
+    summary_dim: 8
     pretrained: true
     warmup_steps: 500
     max_lr: 0.01
@@ -31,8 +31,8 @@ trainer:
         logging_interval: "step"
     - class_path: ModelCheckpoint
       init_args:
-        monitor: "val_score"
-        mode: "max"
+        monitor: "val_mse"
+        mode: "min"
         save_top_k: 3
         save_last: true
     - class_path: EarlyStopping
