@@ -120,9 +120,13 @@ def power_spectrum_batch(x, pixsize=2. / 60 / 180 * np.pi, kedge=np.logspace(2, 
     power = power[:, 1:nk+1]# Exclude DC bin
 
     if normalize:
-        # Normalize the power spectrum for ML ingestion
+        # Normalize per-batch (consistent with HOS/scattering normalization).
+        # LOG_PS_MEAN/STD were computed on noiseless maps; using them on noisy
+        # maps causes +1 to +4 sigma bias at high-k (noise-dominated) bins.
         log_power = torch.log10(power + 1e-30)
-        log_power = (log_power - LOG_PS_MEAN.unsqueeze(0).to(device=device, dtype=dtype)) / LOG_PS_STD.unsqueeze(0).to(device=device, dtype=dtype)
+        mean = log_power.mean(dim=0, keepdim=True)
+        std = log_power.std(dim=0, keepdim=True) + 1e-8
+        log_power = (log_power - mean) / std
         power = log_power
 
     return power_k, power
