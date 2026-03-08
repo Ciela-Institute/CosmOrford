@@ -1,0 +1,53 @@
+# Stage 2: Train normalizing flow p(Omega_m, sigma_8 | z) using frozen compressor.
+#
+# HOW TO USE:
+#   1. Complete stage 1 training (hos_compressor.yaml).
+#   2. Set compressor_checkpoint_path below to the best checkpoint from stage 1.
+#      Checkpoints are saved under lightning_logs/ or the WandB artifact path.
+#      Example: lightning_logs/version_0/checkpoints/epoch=29-step=XXXX.ckpt
+#   3. Submit: sbatch scripts/submit_job.sh configs/experiments/hos_posterior.yaml
+
+model:
+  class_path: cosmoford.hos_compressor.HOSPosterior
+  init_args:
+    # Path to the best HOSCompressor checkpoint from stage 1.
+    # Update this before submitting stage 2.
+    compressor_checkpoint_path: "PLACEHOLDER_SET_BEFORE_RUNNING"
+    # --- Normalizing flow ---
+    flow_transforms: 8
+    flow_hidden_dim: 128
+    # --- Training ---
+    warmup_steps: 500
+    max_lr: 0.0005
+    decay_rate: 0.90
+    decay_every_epochs: 1
+
+data:
+  class_path: cosmoford.dataset.ChallengeDataModule
+  init_args:
+    batch_size: 256
+    num_workers: 12
+
+trainer:
+  max_epochs: 30
+  accelerator: gpu
+  precision: "16-mixed"
+  log_every_n_steps: 1
+  check_val_every_n_epoch: 1
+  callbacks:
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: "step"
+    - class_path: ModelCheckpoint
+      init_args:
+        monitor: "val_nll"
+        mode: "min"
+        save_top_k: 3
+        save_last: true
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: "hos_posterior"
+      project: "neurips-wl-challenge"
+      entity: "cosmostat"
+      log_model: true
