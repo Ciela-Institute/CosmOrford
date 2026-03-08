@@ -34,11 +34,11 @@ trainer:
         mode: "min"
         save_top_k: 3
         save_last: true
-    - class_path: EarlyStopping
-      init_args:
-        monitor: "val_mse"
-        patience: 10
-        mode: "min"
+    # - class_path: EarlyStopping
+    #   init_args:
+    #     monitor: "val_mse"
+    #     patience: 10
+    #     mode: "min"
   logger:
     class_path: WandbLogger
     init_args:

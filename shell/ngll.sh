@@ -1,7 +1,7 @@
 #!/bin/bash
 # SLURM parameters for every job submitted
 #SBATCH --tasks=1
-#SBATCH --time=00-03:00 # time (DD-HH:MM)
+#SBATCH --time=00-08:00 # time (DD-HH:MM)
 #SBATCH --account=rrg-lplevass
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=1
