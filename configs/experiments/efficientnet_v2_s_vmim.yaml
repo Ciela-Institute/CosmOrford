@@ -8,15 +8,17 @@ model:
     decay_every_epochs: 1
     dropout_rate: 0.2
     loss_type: "log_prob"
-    use_flow: true # Add options for MSE instead of vmim ??
+    use_flow: true
 
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
-    batch_size: 128
+    batch_size: 64
     num_workers: 8
+    max_train_samples: 0
 
 trainer:
+  default_root_dir: "/home/noedia/links/scratch/wl_chall/models"
   max_epochs: 50
   accelerator: gpu
   precision: "16-mixed"
@@ -29,13 +31,13 @@ trainer:
         logging_interval: "step"
     - class_path: ModelCheckpoint
       init_args:
-        monitor: "val_score"
-        mode: "max"
+        monitor: "val_nll"
+        mode: "min"
         save_top_k: 3
         save_last: true
     - class_path: EarlyStopping
       init_args:
-        monitor: "val_mse"
+        monitor: "val_nll"
         patience: 10
         mode: "min"
   logger:
@@ -44,4 +46,6 @@ trainer:
       name: "effnet_v2_s_ngll"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
+      save_dir: "/home/noedia/links/scratch/wl_chall/models/vmim_npe_stuff"
       log_model: true
+ 
