@@ -12,11 +12,12 @@ model:
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
-    batch_size: 128
+    batch_size: 64
     num_workers: 8
     max_train_samples: 0
 
 trainer:
+  default_root_dir: "/home/noedia/links/scratch/wl_chall/models"
   max_epochs: 50
   accelerator: gpu
   precision: "16-mixed"
@@ -44,4 +45,6 @@ trainer:
       name: "effnet_v2_s_ngll"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
+      save_dir: "/home/noedia/links/scratch/wl_chall/models"
       log_model: true
+ 

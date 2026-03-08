@@ -104,7 +104,8 @@ class ChallengeDataModule(L.LightningDataModule):
 
     def setup(self, stage=None):
         # Load the main dataset
-        dset = load_dataset("cosmostat/neurips-wl-challenge-flat")
+        shared_dir = "/home/noedia/links/projects/rrg-lplevass/shared/wl_chall_data/neurips-wl-challenge-flat"
+        dset = load_dataset(shared_dir)
         dset = dset.with_format("torch")
 
         # Determine which dataset to use for training
