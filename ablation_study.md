@@ -238,7 +238,64 @@ This corresponds to run `fttkhhhw` (val_score = **11.467**, val_MSE = **6.79×10
 
 ---
 
-## Appendix: Full Run Table (with SNR settings)
+## 7. Targeted Questions
+
+This section addresses five specific scientific questions. Comparisons use matched settings throughout (ns=4, nbins=51, l1nbins=80 where applicable). Runs marked † use per-batch PS normalisation (fixed). Runs marked ‡ are pending (SLURM jobs 7896635–7896638).
+
+### Q1. Does including the PS add anything to HOS?
+
+| Condition | Run | Val score |
+|-----------|-----|-----------|
+| HOS alone | lprg7hu1 | 11.153 |
+| PS + HOS (bugged norm) | msatahn4 | 10.079 |
+| **PS + HOS (fixed norm)†** | **ablation_ps_hos_fixed‡** | **pending** |
+
+The bugged PS+HOS was *worse* than HOS alone (−1.07 pts), clearly an artefact of the normalisation bug (§2.1). With the corrected per-batch normalisation, the result is pending (job 7896635). Based on the PS+HOS+Scat fixed result (11.398 vs HOS+Scat 11.361, +0.037 pts), any gain from PS is expected to be small.
+
+**Physical expectation**: The PS captures Gaussian-scale amplitude information. HOS L1-norms already encode the one-point amplitude distribution at each scale, which implicitly contains the variance (the 2nd moment). Any incremental information from the PS would come from its precise k-space decomposition (angular power spectrum shape), which is not directly captured by HOS. Whether this translates into a measurable improvement depends on how much cosmological discriminating power lies in the PS *shape* rather than the amplitude.
+
+### Q2. Is the scattering transform better than HOS?
+
+| Condition | Run | Val score |
+|-----------|-----|-----------|
+| Scattering alone (J=4) | 1p44eqr2 | 9.942 |
+| HOS alone (ns=4) | lprg7hu1 | **11.153** |
+
+**No — HOS is substantially better (+1.21 pts).** The scattering transform computes a cascade of wavelet modulus averages, encoding *inter-scale amplitude correlations*. It is a compact descriptor but misses the one-point distributional information (peak abundance vs SNR, histogram tails) that is directly linked to the cosmological halo mass function. HOS explicitly histograms the wavelet field at each scale, providing a richer characterisation of the non-Gaussian structure. The scattering coefficients are, by construction, *averages* over the spatial field, discarding the local extreme-value statistics (massive cluster peaks, deep voids) that are the most cosmologically sensitive.
+
+### Q3. Is the combination HOS + Scattering better than Scattering alone?
+
+| Condition | Run | Val score |
+|-----------|-----|-----------|
+| Scattering alone (J=4) | 1p44eqr2 | 9.942 |
+| HOS + Scattering (J=4) | 7s2u38we | **11.361** |
+
+**Yes — by +1.42 pts.** HOS adds substantial information on top of the scattering transform. This is expected: scattering coefficients capture cross-scale correlations efficiently but are insensitive to the one-point distribution. HOS fills this gap with peak count histograms and L1-norm histograms. The combination is strictly better because the two descriptors are complementary — neither is redundant with the other.
+
+### Q4. Does including the PS add anything to the L1-norm?
+
+| Condition | Run | L1 SNR | Val score |
+|-----------|-----|--------|-----------|
+| L1-norm alone | 388wnkgf | [−7, 7] | 10.963 |
+| **PS + L1-norm (fixed norm)†** | **ablation_ps_l1_fixed‡** | [−7, 7] | **pending** |
+| L1-norm alone (wide) | ablation_l1_only_l1_wide‡ | [−10, 10] | **pending** |
+
+Pending (jobs 7896636, 7896638). Since the L1-norm histogram captures the full one-point amplitude distribution of the wavelet field, it already encodes the variance (equivalent to the total power). The PS provides the *angular scale decomposition* of that power; whether this k-space shape carries additional information beyond what the multi-scale L1-norms already characterise is the question under test.
+
+### Q5. Does adding peak counts improve over the L1-norm alone?
+
+| Condition | Run | Peaks SNR | L1 SNR | Val score |
+|-----------|-----|-----------|--------|-----------|
+| L1-norm alone | 388wnkgf | — | [−7, 7] | 10.963 |
+| Full HOS (peaks + L1) | lprg7hu1 | [−3, 7] | [−7, 7] | **11.153** |
+| L1-norm alone (wide) | ablation_l1_only_l1_wide‡ | — | [−10, 10] | **pending** |
+| Full HOS (wide L1) | ablation_hos_l1_wide‡ | [−3, 7] | [−10, 10] | **pending** |
+
+**Yes — adding peak counts gains +0.190 pts** (standard settings). Peak counts and L1-norms are complementary non-Gaussian statistics: while L1-norms capture the full amplitude distribution (including voids), **peak counts specifically measure local maxima** — a spatially-structured statistic that is directly linked to the halo mass function and sensitive to the clustering topology of the convergence field in a way that pixel-level histograms are not. A pixel at a given SNR in the L1-norm histogram could be isolated noise or part of a large coherent structure; the peak count histogram distinguishes these cases by requiring spatial concentration.
+
+The pending wide-L1 runs (jobs 7896637–7896638) will confirm whether this +0.19 pt advantage from peaks persists at the better-performing L1 SNR range [−10, 10].
+
+> **§7 to be updated with results from SLURM jobs 7896635–7896638.**
 
 | Run ID | Statistics | Variant | ns | nbins | l1nbins | Peaks SNR | L1 SNR | Val score | Val MSE |
 |--------|-----------|---------|-----|-------|---------|-----------|--------|-----------|---------|
