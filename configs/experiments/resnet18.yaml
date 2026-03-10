@@ -1,0 +1,44 @@
+model:
+  class_path: cosmoford.models_nopatch.RegressionModelNoPatch
+  init_args:
+    backbone: "resnet18"
+    summary_dim: 8
+    pretrained: true
+    warmup_steps: 500
+    max_lr: 0.01
+    decay_rate: 0.85
+    dropout_rate: 0.2
+    lr_schedule: "cosine"
+    n_val_noise: 8
+    loss_type: "log_prob"
+
+data:
+  class_path: cosmoford.dataset.ChallengeDataModule
+  init_args:
+    batch_size: 64
+    num_workers: 8
+
+trainer:
+  max_steps: 16000
+  accelerator: gpu
+  precision: "16-mixed"
+  gradient_clip_val: 1.0
+  log_every_n_steps: 1
+  val_check_interval: 500
+  callbacks:
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: "step"
+    - class_path: ModelCheckpoint
+      init_args:
+        monitor: "val_mse"
+        mode: "min"
+        save_top_k: 3
+        save_last: true
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: "resnet18-pretrained-cosine"
+      project: "neurips-wl-challenge"
+      entity: "cosmostat"
+      log_model: true

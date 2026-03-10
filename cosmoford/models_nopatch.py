@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK, NOISE_STD
 from cosmoford.summaries import power_spectrum_batch
 from torchvision.models.efficientnet import efficientnet_b0, efficientnet_b2, efficientnet_v2_s, efficientnet_v2_m
+from torchvision.models.resnet import resnet18, ResNet18_Weights
 from peft import LoraConfig, get_peft_model
 from nflows.flows import Flow
 from nflows.distributions import StandardNormal
@@ -37,6 +38,9 @@ class RegressionModelNoPatch(L.LightningModule):
                loss_type: str = "log_prob", freeze_backbone: bool = False,
                use_flow: bool = False, flow_transforms: int = 4, flow_hidden_dim: int = 64,
                pretrained_checkpoint_path: str = None,
+               pretrained: bool = False, lr_schedule: str = "step",
+               total_steps: int = 0,
+               n_val_noise: int = 1,
                use_peft: bool = False, lora_r: int = 8, lora_alpha: int = 16,
                lora_dropout: float = 0.1, lora_target_modules: list = None):
     super().__init__()
@@ -44,19 +48,33 @@ class RegressionModelNoPatch(L.LightningModule):
     self.mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
     last_dim = 1280  # For efficientnet_b0
-    if backbone == "efficientnet_b0":
+    if backbone == "resnet18":
+      vision_model = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
+      # ResNet: use all layers except avgpool and fc
+      self.model = nn.Sequential(
+        vision_model.conv1, vision_model.bn1, vision_model.relu, vision_model.maxpool,
+        vision_model.layer1, vision_model.layer2, vision_model.layer3, vision_model.layer4,
+      )
+      last_dim = 512
+    elif backbone == "efficientnet_b0":
       vision_model = efficientnet_b0()
+      self.model = vision_model.features
     elif backbone == "efficientnet_b2":
       vision_model = efficientnet_b2()
       last_dim = 1408
+      self.model = vision_model.features
     elif backbone == "efficientnet_v2_s":
       vision_model = efficientnet_v2_s()
+      self.model = vision_model.features
     elif backbone == "efficientnet_v2_m":
       vision_model = efficientnet_v2_m()
+      self.model = vision_model.features
     else:
       raise ValueError(f"Backbone {backbone} not supported.")
 
-    self.model = vision_model.features
+    # Adapt first conv layer from 3-channel to 1-channel input
+    if pretrained:
+      self._adapt_first_conv(backbone)
 
     # Store use_peft flag for later use
     self._use_peft = use_peft
@@ -120,6 +138,10 @@ class RegressionModelNoPatch(L.LightningModule):
       'use_flow': use_flow,
       'flow_transforms': flow_transforms,
       'flow_hidden_dim': flow_hidden_dim,
+      'pretrained': pretrained,
+      'lr_schedule': lr_schedule,
+      'total_steps': total_steps,
+      'n_val_noise': n_val_noise,
       'use_peft': use_peft,
       'lora_r': lora_r,
       'lora_alpha': lora_alpha,
@@ -151,12 +173,37 @@ class RegressionModelNoPatch(L.LightningModule):
     if freeze_backbone:
       self.freeze_backbone_layers()
 
+  def _adapt_first_conv(self, backbone):
+    """Replace first conv layer from 3-channel to 1-channel input.
+    Sums pretrained 3-channel weights into a single channel."""
+    if backbone == "resnet18":
+      old_conv = self.model[0]  # conv1
+    elif backbone.startswith("efficientnet"):
+      old_conv = self.model[0][0]  # features[0] is first ConvBNActivation block
+
+    new_conv = nn.Conv2d(
+      1, old_conv.out_channels,
+      kernel_size=old_conv.kernel_size,
+      stride=old_conv.stride,
+      padding=old_conv.padding,
+      bias=old_conv.bias is not None,
+    )
+    with torch.no_grad():
+      new_conv.weight.copy_(old_conv.weight.sum(dim=1, keepdim=True))
+      if old_conv.bias is not None:
+        new_conv.bias.copy_(old_conv.bias)
+
+    if backbone == "resnet18":
+      self.model[0] = new_conv
+    elif backbone.startswith("efficientnet"):
+      self.model[0][0] = new_conv
+
   def forward(self, x):
     # Add channel dimension if missing
     if x.dim() == 3:
       x = x.unsqueeze(1)
-    # Repeat channels to match expected input size (e.g., 3 for RGB)
-    if x.size(1) == 1:
+    # Repeat channels to match expected input size (only if not using pretrained single-channel adaptation)
+    if x.size(1) == 1 and not self.hparams.pretrained:
       x = x.repeat(1, 3, 1, 1)
 
     # Compute features
@@ -167,6 +214,16 @@ class RegressionModelNoPatch(L.LightningModule):
     summaries = self.compressor(features)
     x = self.head(summaries)
     return x[..., :2], F.softplus(x[..., 2:]) + 0.001, summaries  # mean, std, summaries
+
+  def compress(self, x):
+    """Return the compressed summary representation."""
+    if x.dim() == 3:
+      x = x.unsqueeze(1)
+    if x.size(1) == 1 and not self.hparams.pretrained:
+      x = x.repeat(1, 3, 1, 1)
+    features = self.model(x.float())
+    features = self.reshape_head(features)
+    return self.compressor(features)
 
   def load_pretrained_weights(self, checkpoint_path: str):
     """Load weights from a pretrained checkpoint.
@@ -287,13 +344,21 @@ class RegressionModelNoPatch(L.LightningModule):
 
   def validation_step(self, batch, batch_idx):
     x, y = batch
+    mask = torch.tensor(self.mask, device=x.device).unsqueeze(0)
 
-    # Adding noise to the input convergence maps and applying mask
-    noise = torch.randn_like(x) * NOISE_STD
-    x = x + noise
-    x = x * torch.tensor(self.mask, device=x.device).unsqueeze(0)
-
-    mean, std, summaries = self(x)
+    # Multi-noise validation averaging for stable metrics
+    total_mean = 0.0
+    total_std = 0.0
+    total_summaries = 0.0
+    for _ in range(self.hparams.n_val_noise):
+      x_noisy = (x + torch.randn_like(x) * NOISE_STD) * mask
+      m, s, summ = self(x_noisy)
+      total_mean += m
+      total_std += s
+      total_summaries += summ
+    mean = total_mean / self.hparams.n_val_noise
+    std = total_std / self.hparams.n_val_noise
+    summaries = total_summaries / self.hparams.n_val_noise
 
     if self.hparams.use_flow:
       nll = -self.flow.log_prob(y, context=summaries).mean()
@@ -320,13 +385,12 @@ class RegressionModelNoPatch(L.LightningModule):
   def configure_optimizers(self):
     optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.max_lr, weight_decay=1e-5)
 
-    # Calculate total steps
-    total_steps = int(self.trainer.estimated_stepping_batches)
+    # Use fixed total_steps if provided, otherwise derive from trainer
+    if self.hparams.total_steps > 0:
+      total_steps = self.hparams.total_steps
+    else:
+      total_steps = int(self.trainer.estimated_stepping_batches)
     warmup_steps = self.hparams.warmup_steps
-
-    # Calculate step size for StepLR in terms of steps (not epochs)
-    steps_per_epoch = total_steps // self.trainer.max_epochs
-    step_size_in_steps = self.hparams.decay_every_epochs * steps_per_epoch
 
     # Linear warmup from 0 to max_lr
     warmup = torch.optim.lr_scheduler.LinearLR(
@@ -336,17 +400,24 @@ class RegressionModelNoPatch(L.LightningModule):
         total_iters=warmup_steps,
     )
 
-    # Step decay after warmup (in steps, not epochs)
-    decay = torch.optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=step_size_in_steps,
-        gamma=self.hparams.decay_rate,
-    )
+    if self.hparams.lr_schedule == "cosine":
+      main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+          optimizer, T_max=total_steps - warmup_steps
+      )
+    else:  # "step"
+      # Calculate step size for StepLR in terms of steps (not epochs)
+      steps_per_epoch = total_steps // self.trainer.max_epochs
+      step_size_in_steps = self.hparams.decay_every_epochs * steps_per_epoch
+      main_scheduler = torch.optim.lr_scheduler.StepLR(
+          optimizer,
+          step_size=step_size_in_steps,
+          gamma=self.hparams.decay_rate,
+      )
 
-    # Combine warmup and decay
+    # Combine warmup and main schedule
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
-        schedulers=[warmup, decay],
+        schedulers=[warmup, main_scheduler],
         milestones=[warmup_steps],
     )
 
