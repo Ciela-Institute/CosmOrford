@@ -56,7 +56,6 @@ NPE_PATIENCE = 50
 NPE_SEEDS = 5
 
 # FoM evaluation parameters
-N_FIDUCIAL_MAPS = 50
 N_POSTERIOR_SAMPLES = 10_000
 
 # Fiducial cosmology (unnormalized)
@@ -317,7 +316,7 @@ def train_npe_for_budget(budget: int):
     print(f"\nOverall best val NLL across {NPE_SEEDS} seeds: {best_val_nll:.4f}")
 
     # ── 6. Compute FoM at fiducial cosmology ──
-    print(f"Computing FoM ({N_FIDUCIAL_MAPS} near-fiducial maps)...")
+    print("Computing FoM (all fiducial maps)...")
 
     # Load compressor for FoM eval if not already loaded (cache path)
     if compressor is None:
@@ -327,29 +326,19 @@ def train_npe_for_budget(budget: int):
         for p in compressor.parameters():
             p.requires_grad = False
 
-    # Load holdout kappa maps for FoM eval (need raw maps for fresh noisy obs)
-    print("Loading holdout maps for FoM evaluation...")
-    holdout = load_dataset("CosmoStat/neurips-wl-challenge-holdout", split="train")
+    # Load fiducial kappa maps directly (split='fiducial' contains only fiducial cosmology maps)
+    print("Loading fiducial maps for FoM evaluation...")
+    holdout = load_dataset("CosmoStat/neurips-wl-challenge-holdout", split="fiducial")
     holdout = holdout.with_format("numpy")
     kappa_all_fom = np.array(holdout["kappa"])
+    print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
     from cosmoford import SURVEY_MASK
     mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
-    # Find maps closest to fiducial in parameter space
-    distances = np.sqrt(
-        ((theta_all[:, 0] - FIDUCIAL_OMEGA_M) / THETA_STD[0]) ** 2
-        + ((theta_all[:, 1] - FIDUCIAL_S8) / THETA_STD[1]) ** 2
-    )
-    fiducial_idx = np.argsort(distances)[:N_FIDUCIAL_MAPS]
-    print(f"  Selected {len(fiducial_idx)} maps near fiducial "
-          f"(Omega_m={theta_all[fiducial_idx, 0].mean():.4f}, "
-          f"S8={theta_all[fiducial_idx, 1].mean():.4f})")
-
     fom_values = []
     with torch.no_grad():
-        for idx in fiducial_idx:
-            kappa_i = kappa_all_fom[idx]
+        for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
 
             # Single noisy observation
@@ -393,7 +382,7 @@ def train_npe_for_budget(budget: int):
         "fom_values": [float(v) for v in fom_values],
         "best_val_nll": float(best_val_nll),
         "n_noise_realizations": N_NOISE_REALIZATIONS,
-        "n_fiducial_maps": N_FIDUCIAL_MAPS,
+        "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": N_POSTERIOR_SAMPLES,
         "compressor_checkpoint": ckpt_path,
     }
