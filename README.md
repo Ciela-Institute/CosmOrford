@@ -45,6 +45,7 @@ Posterior samples are drawn for maps from the `fiducial` split of the holdout da
 Physically motivated statistics computed directly from the masked convergence maps, such as peak counts, wavelet ℓ₁-norm, or power spectrum. A small MLP is then trained to compress these hand-crafted features into an 8D vector by maximizing a Gaussian log-likelihood.
 
 **Training script:** `trainer fit -c <config TBD>`
+
 **Dataset:** [`CosmoStat/neurips-wl-challenge-flat`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-flat)
 
 ---
