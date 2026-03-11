@@ -1,0 +1,9 @@
+cosmo_params:
+  prior: "uniform" # can be truncated multivariate normal (TMN) as well
+  prior_params:
+  - [0.07, 0.65] # Training set has (0.0913, 0.62)
+  - [0.6, 0.98] # Training set has (0.68, 0.95)
+
+redshift_shift:
+  prior: "normal"
+  prior_params: [0, 0.022] # (mean, std)
