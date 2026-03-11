@@ -23,8 +23,8 @@ Posterior samples are drawn for maps from the `fiducial` split of the holdout da
 
 | Script | Description |
 |---|---|
-| `cosmoford/models_nopatch.py` | Compressor model (EfficientNetV2-S), trained via `cosmoford/trainer.py` |
-| `scripts/run_npe_budget_scan.py` | Trains the NPE flow and computes FoM, sweeping over simulation budgets (runs on Modal) |
+| `cosmoford/models_nopatch.py` | Compressor model, trained via `cosmoford/trainer.py` |
+| `scripts/run_npe_budget_scan.py` | Trains the NPE flow and computes FoM, sweeping over simulation budgets |
 | `scripts/plot_fom_budget.py` | Plots FoM vs. simulation budget from saved results |
 
 **Datasets:**
