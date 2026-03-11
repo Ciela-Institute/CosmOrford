@@ -1,4 +1,15 @@
+<div align="center">
+
 # CosmOrford
+
+*How to build optimal summary statistics for weak gravitational lensing cosmology under a limited simulation budget?*
+
+[![Challenge](https://img.shields.io/badge/Challenge-FAIR%20Universe%20WL-blue)](https://www.codabench.org/competitions/8934/)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![HuggingFace](https://img.shields.io/badge/🤗%20Datasets-CosmoStat-FFD21E)](https://huggingface.co/CosmoStat)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+</div>
 
 This repository investigates how to build optimal summary statistics for weak gravitational lensing cosmology under a limited simulation budget. This work distills lessons learned from participating in the [FAIR Universe - Weak Lensing ML Uncertainty Challenge](https://www.codabench.org/competitions/8934/).
 
@@ -6,7 +17,7 @@ We compare different strategies for building summary statistics — analytical, 
 
 ---
 
-## Evaluation framework
+## 📐 Evaluation framework
 
 All summary strategies are evaluated through the same three-step pipeline, which ensures a fair comparison across approaches.
 
@@ -35,12 +46,11 @@ Posterior samples are drawn for maps from the `fiducial` split of the holdout da
 | [`CosmoStat/neurips-wl-challenge-holdout`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-holdout) | `train` | NPE training (summaries precomputed with noise augmentation) |
 | [`CosmoStat/neurips-wl-challenge-holdout`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-holdout) | `fiducial` | FoM evaluation |
 
-
 ---
 
-## Summary statistics strategies
+## 🗂️ Summary statistics strategies
 
-### Option A — Analytical summaries
+### 🔢 Option A — Analytical summaries
 
 Physically motivated statistics computed directly from the masked convergence maps, such as peak counts, wavelet ℓ₁-norm, or power spectrum. A small MLP is then trained to compress these hand-crafted features into an 8D vector by maximizing a Gaussian log-likelihood.
 
@@ -50,7 +60,7 @@ Physically motivated statistics computed directly from the masked convergence ma
 
 ---
 
-### Option B — Neural compressor (no pre-training)
+### 🧠 Option B — Neural compressor (no pre-training)
 
 An EfficientNetV2-S network trained directly on the N-body simulations, compressing each convergence map to 8 summary statistics by maximizing the Gaussian log-likelihood.
 
@@ -60,7 +70,7 @@ An EfficientNetV2-S network trained directly on the N-body simulations, compress
 
 ---
 
-### Option C — Neural compressor with pre-training
+### 🚀 Option C — Neural compressor with pre-training
 
 Same EfficientNetV2-S architecture, but first pre-trained on a larger set of cheaper simulations to reduce overfitting when the N-body budget is small, then fine-tuned on the N-body dataset. The compressor is trained with a Gaussian log-likelihood loss.
 
@@ -73,13 +83,11 @@ Available pre-training datasets and their configs:
 
 | Simulation type | Local dataset | Pre-training config |
 |---|---|---|
-|  Gaussian Random Field (GRF) | `CosmoStat/GRF_HF` | `None` |
+| Gaussian Random Field (GRF) | `CosmoStat/GRF_HF` | `None` |
 | LogNormal | `CosmoStat/lognormal` | `configs/experiments/pretrain_lognormal_nopatch_logp.yaml` |
 | Gower Street | `CosmoStat/gowerstreet-train` | `configs/experiments/pretrain_gowerstreet_nopatch_logp.yaml` |
 | OT-emulated (from LogNormal) | `CosmoStat/ot_emulated` | `configs/pretrain_otemulated_nopatch_logp.yaml` |
-| OT-emulated from TBD| output of the emulator (see below) | TBD maps corrected to match N-body distribution |
-
-
+| OT-emulated from TBD | output of the emulator (see below) | TBD |
 
 ```bash
 # Example: pre-train on LogNormal, then fine-tune on challenge data
@@ -89,7 +97,7 @@ trainer fit -c configs/finetune_from_pretrain_nopatch_logp.yaml
 
 ---
 
-### Building the OT-emulated dataset
+### ⚙️ Building the OT-emulated dataset
 
 To bridge the gap between cheap simulations and the N-body distribution, a UNet emulator is trained using conditional optimal-transport flow matching (COT-FM). It maps LogNormal (or Gower Street) convergence maps to the distribution of N-body maps, conditioned on cosmological parameters. The emulated maps are then used as pre-training data for Option C.
 
@@ -97,12 +105,12 @@ To bridge the gap between cheap simulations and the N-body distribution, a UNet 
 **UNet configs:** `configs/unet_condition_small.yaml` / `configs/unet_condition_large.yaml`
 **Build HF dataset from emulated maps:** `scripts/hf_emulated_dataset.py`
 
-| Dataset | Path | Role |
-|---|---|---|
-| GRF source | `CosmoStat/GRF_HF` | Cheap simulations to be corrected |
-| LogNormal source | `CosmoStat/lognormal` | Cheap simulations to be corrected |
-| PM source | To be generated | Cheap simulations to be corrected |
-| N-body reference | [`CosmoStat/neurips-wl-challenge-flat`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-flat) | Target distribution for the emulator |
+| Dataset | Role |
+|---|---|
+| `CosmoStat/GRF_HF` | Cheap simulations to be corrected (GRF) |
+| `CosmoStat/lognormal` | Cheap simulations to be corrected (LogNormal) |
+| PM source | To be generated |
+| [`CosmoStat/neurips-wl-challenge-flat`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-flat) | N-body target distribution for the emulator |
 
 ```bash
 python cosmoford/emulator/cot_fm.py \
@@ -117,7 +125,7 @@ python scripts/hf_emulated_dataset.py
 
 ---
 
-## Installation
+## 🔧 Installation
 
 ```bash
 pip install -e .
@@ -125,20 +133,19 @@ pip install -e .
 
 Requires Python ≥ 3.8. Key dependencies: `torch`, `lightning`, `diffusers`, `torchdyn`, `nflows`, `datasets`, `wandb`.
 
+---
 
-## Team
+## 👥 Team
 
-- [@AndreasTersenov](https://github.com/AndreasTersenov)
-- [@ASKabalan](https://github.com/ASKabalan)
-- [@b-remy](https://github.com/b-remy)
-- [@EiffL](https://github.com/EiffL)
-- [@noe-dia](https://github.com/noe-dia)
-- [@JuliaLinhart](https://github.com/JuliaLinhart)
-- [@Justinezgh](https://github.com/Justinezgh)
-- [@LaurencePeanuts](https://github.com/LaurencePeanuts)
-- [@SammyS15](https://github.com/SammyS15)
-- [@sachaguer](https://github.com/sachaguer)
+| | | |
+|---|---|---|
+| [@AndreasTersenov](https://github.com/AndreasTersenov) | [@ASKabalan](https://github.com/ASKabalan) | [@b-remy](https://github.com/b-remy) |
+| [@EiffL](https://github.com/EiffL) | [@noe-dia](https://github.com/noe-dia) | [@JuliaLinhart](https://github.com/JuliaLinhart) |
+| [@Justinezgh](https://github.com/Justinezgh) | [@LaurencePeanuts](https://github.com/LaurencePeanuts) | [@SammyS15](https://github.com/SammyS15) |
+| [@sachaguer](https://github.com/sachaguer) | | |
 
-## License
+---
+
+## 📝 License
 
 See [LICENSE](LICENSE) file for details.
