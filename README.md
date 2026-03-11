@@ -135,7 +135,7 @@ python scripts/build_hf_dataset.py
 - [@ASKabalan](https://github.com/ASKabalan)
 - [@b-remy](https://github.com/b-remy)
 - [@EiffL](https://github.com/EiffL)
-- [@EnceladeCandy](https://github.com/EnceladeCandy)
+- [@noe-dia](https://github.com/noe-dia)
 - [@JuliaLinhart](https://github.com/JuliaLinhart)
 - [@Justinezgh](https://github.com/Justinezgh)
 - [@LaurencePeanuts](https://github.com/LaurencePeanuts)
