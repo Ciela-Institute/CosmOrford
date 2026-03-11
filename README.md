@@ -124,10 +124,6 @@ pip install -e .
 
 Requires Python ≥ 3.8. Key dependencies: `torch`, `lightning`, `diffusers`, `torchdyn`, `nflows`, `datasets`, `wandb`.
 
-To build the challenge dataset from raw files:
-```bash
-python scripts/build_hf_dataset.py
-```
 
 ## Team
 
