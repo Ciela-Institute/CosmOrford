@@ -64,7 +64,7 @@ Physically motivated statistics computed directly from the masked convergence ma
 
 An EfficientNetV2-S network trained directly on the N-body simulations, compressing each convergence map to 8 summary statistics by maximizing the Gaussian log-likelihood.
 
-**Training script:** `trainer fit -c configs/experiments/efficientnet__logp_.yaml`
+**Training script:** `trainer fit -c configs/experiments/efficientnet_v2_s_logp_.yaml`
 
 **Dataset:** [`CosmoStat/neurips-wl-challenge-flat`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-flat)
 
