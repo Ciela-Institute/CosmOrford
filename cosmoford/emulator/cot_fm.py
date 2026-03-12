@@ -357,8 +357,9 @@ micro_bs = int(args.micro_batch_size)
 
 min_dataset_size = min(len(train_dataset_lognormal), len(train_dataset_nbody))
 num_training_steps_total = (min_dataset_size // micro_bs) * num_epochs
-nb_checkpoints = num_training_steps_total // 10
-step = 0 
+nb_checkpoints = num_training_steps_total // 5
+step = 0
+best_val_loss = float('inf')
 
 for epoch in tqdm(range(num_epochs)):
     ds_train_logn = get_iterable_dataset(train_dataset_lognormal, batch_size, int((epoch + 1) * 1000))
@@ -384,7 +385,7 @@ for epoch in tqdm(range(num_epochs)):
                 "learning_rate": optimizer.param_groups[0]['lr'],
                 "epoch": epoch,
             })
-            if step % 200 == 0:
+            if step % 500 == 0:
                 # basic scheduler step per epoch
                 scheduler.step()
 
@@ -404,6 +405,17 @@ for epoch in tqdm(range(num_epochs)):
                     "train_loss_epoch": float(loss),
                     "epoch": epoch
                 })
+
+                if loss_t < best_val_loss:
+                    best_val_loss = loss_t
+                    best_ckpt = str(ckpt_dir / "unet_best.pth")
+                    torch.save(unet.state_dict(), best_ckpt)
+                    try:
+                        art = wandb.Artifact("unet-best", type="model")
+                        art.add_file(best_ckpt)
+                        wandb.log_artifact(art)
+                    except Exception:
+                        pass
 
             if step % nb_checkpoints == 0:
                 # Save and log checkpoint to wandb as an artifact
@@ -478,6 +490,7 @@ for epoch in tqdm(range(num_epochs)):
                 except Exception:
                     pass
                 plt.close(fig)
+
 
 # Final trained model
 try:
