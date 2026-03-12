@@ -365,6 +365,10 @@ class RegressionModelNoPatch(L.LightningModule):
       self.log('val_nll', nll, prog_bar=True)
       return nll
 
+    loss_val = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+    self.log('val_log_prob', loss_val, prog_bar=True)
+
+
     # Rescaling back to original parameters
     mean = mean * torch.tensor(THETA_STD[:2], device=mean.device) + torch.tensor(THETA_MEAN[:2], device=mean.device)
     std = std * torch.tensor(THETA_STD[:2], device=std.device)
