@@ -5,6 +5,7 @@ model:
   class_path: cosmoford.models_nopatch.RegressionModelNoPatch
   init_args:
     backbone: "efficientnet_v2_s"
+    summary_dim: 8
     warmup_steps: 100
     max_lr: 0.003
     decay_rate: 0.8
@@ -25,11 +26,11 @@ data:
     dataset_mode: "train"
 
 trainer:
-  max_epochs: 9
+  max_steps: 16000
   accelerator: gpu
   precision: "16-mixed"
   log_every_n_steps: 1
-  check_val_every_n_epoch: 1
+  val_check_interval: 500
   callbacks:
     - class_path: LearningRateMonitor
       init_args:
@@ -38,8 +39,8 @@ trainer:
     - class_path: ModelCheckpoint
       init_args:
         dirpath: "checkpoints/"
-        monitor: "val_log_prob"
-        mode: "max"
+        monitor: "val_mse"
+        mode: "min"
         save_top_k: 3
         save_last: true
         filename: "finetune-{epoch:02d}-{val_log_prob:.4f}"
