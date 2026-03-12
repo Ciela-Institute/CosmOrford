@@ -1,0 +1,52 @@
+# Fine-tuning from a pretrained checkpoint using Gaussian log-likelihood loss.
+# Update pretrained_checkpoint_path to point to your pretrained checkpoint.
+
+model:
+  class_path: cosmoford.models_nopatch.RegressionModelNoPatch
+  init_args:
+    backbone: "efficientnet_v2_s"
+    warmup_steps: 100
+    max_lr: 0.003
+    decay_rate: 0.8
+    decay_every_epochs: 1
+    dropout_rate: 0.1
+    loss_type: "log_prob"
+    pretrained_checkpoint_path: "checkpoints/last.ckpt"  # UPDATE THIS PATH
+    use_peft: false
+    lora_r: 4
+    lora_alpha: 8
+    lora_dropout: 0.1
+
+data:
+  class_path: cosmoford.dataset.ChallengeDataModule
+  init_args:
+    batch_size: 128
+    num_workers: 12
+    dataset_mode: "train"
+
+trainer:
+  max_epochs: 9
+  accelerator: gpu
+  precision: "16-mixed"
+  log_every_n_steps: 1
+  check_val_every_n_epoch: 1
+  callbacks:
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: "step"
+    - class_path: EMAWeightAveraging
+    - class_path: ModelCheckpoint
+      init_args:
+        dirpath: "checkpoints/"
+        monitor: "val_log_prob"
+        mode: "max"
+        save_top_k: 3
+        save_last: true
+        filename: "finetune-{epoch:02d}-{val_log_prob:.4f}"
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: "finetune_from_pretrain_logp_v2_s"
+      project: "neurips-wl-challenge"
+      entity: "cosmostat"
+      log_model: true

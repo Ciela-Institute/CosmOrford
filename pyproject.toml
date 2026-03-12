@@ -10,7 +10,17 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Francois Lanusse", email = "francois.lanusse@cnrs.fr"}
+    {name = "Andreas Tersenov"},
+    {name = "Wassim Kabalan"},
+    {name = "Benjamin Remy"},
+    {name = "Francois Lanusse", email = "francois.lanusse@cnrs.fr"},
+    {name = "Noe Dia"},
+    {name = "Julia Linhart"},
+    {name = "Justine Zeghal"},
+    {name = "Laurence Perreault-Levasseur"},
+    {name = "Sammy Sharief"},
+    {name = "Sacha Guerrini"},
+    {name = "Nicolas Payot"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

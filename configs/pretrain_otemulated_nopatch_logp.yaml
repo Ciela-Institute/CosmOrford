@@ -1,0 +1,41 @@
+model:
+  class_path: cosmoford.models_nopatch.RegressionModelNoPatch
+  init_args:
+    backbone: "efficientnet_v2_s"
+    warmup_steps: 500
+    max_lr: 0.008
+    decay_rate: 0.85
+    decay_every_epochs: 1
+    dropout_rate: 0.2
+    loss_type: "log_prob"
+
+data:
+  class_path: cosmoford.dataset.ChallengeDataModule
+  init_args:
+    batch_size: 128
+    num_workers: 12
+    dataset_mode: "ot_emulated"  # Use OT-emulated pretraining dataset
+
+trainer:
+  max_epochs: 30  # Pretrain for 30 epochs
+  accelerator: gpu
+  precision: "16-mixed"
+  log_every_n_steps: 1
+  check_val_every_n_epoch: 1
+  callbacks:
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: "step"
+    - class_path: EMAWeightAveraging
+    - class_path: ModelCheckpoint
+      init_args:
+        dirpath: "checkpoints/"
+        save_last: true
+        filename: "pretrain-{epoch:02d}-{val_log_prob:.4f}"
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: "pretrain_ot_emulated_v2_s_logp"
+      project: "neurips-wl-challenge"
+      entity: "cosmostat"
+      log_model: true
