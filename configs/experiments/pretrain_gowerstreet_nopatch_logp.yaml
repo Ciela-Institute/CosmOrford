@@ -2,6 +2,7 @@ model:
   class_path: cosmoford.models_nopatch.RegressionModelNoPatch
   init_args:
     backbone: "efficientnet_v2_s"
+    summary_dim: 8
     warmup_steps: 500
     max_lr: 0.008
     decay_rate: 0.85
