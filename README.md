@@ -142,7 +142,7 @@ Requires Python ≥ 3.8. Key dependencies: `torch`, `lightning`, `diffusers`, `t
 | [@AndreasTersenov](https://github.com/AndreasTersenov) | [@ASKabalan](https://github.com/ASKabalan) | [@b-remy](https://github.com/b-remy) |
 | [@EiffL](https://github.com/EiffL) | [@noe-dia](https://github.com/noe-dia) | [@JuliaLinhart](https://github.com/JuliaLinhart) |
 | [@Justinezgh](https://github.com/Justinezgh) | [@LaurencePeanuts](https://github.com/LaurencePeanuts) | [@SammyS15](https://github.com/SammyS15) |
-| [@sachaguer](https://github.com/sachaguer) | | |
+| [@sachaguer](https://github.com/sachaguer) | [@rouzib](https://github.com/rouzib) | |
 
 ---
 
