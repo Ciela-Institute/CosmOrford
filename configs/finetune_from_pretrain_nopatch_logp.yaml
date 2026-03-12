@@ -22,7 +22,7 @@ data:
   init_args:
     batch_size: 128
     num_workers: 12
-    dataset_mode: "full"
+    dataset_mode: "train"
 
 trainer:
   max_epochs: 9
