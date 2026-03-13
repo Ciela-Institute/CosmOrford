@@ -22,6 +22,7 @@ from cosmoford.emulator.utils import (
     augmentation_data_numpy,
     apply_mask,
     iter_microbatches,
+    pqm_evaluate,
 )
 from cosmoford.emulator.neural_ode import solve_ode_forward
 
@@ -490,6 +491,40 @@ for epoch in tqdm(range(num_epochs)):
                 except Exception:
                     pass
                 plt.close(fig)
+
+                # PQMass evaluation: N-body vs UNet
+                try:
+                    pqm_bs = 500
+                    ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, pqm_bs, 99)
+                    ds_pqm_nbody = get_iterable_dataset(test_dataset_nbody, pqm_bs, 99)
+                    batch_pqm_logn = next(ds_pqm_logn)
+                    batch_pqm_nbody = next(ds_pqm_nbody)
+                    batch_pqm = get_ot_batch([batch_pqm_logn, batch_pqm_nbody], np.random.default_rng(0), eps, device, args.ot_reg)
+
+                    pqm_chunks = []
+                    for start in range(0, batch_pqm['x0'].shape[0], micro_bs):
+                        x0_chunk = batch_pqm['x0'][start:start + micro_bs]
+                        theta_chunk = batch_pqm['theta_x0'][start:start + micro_bs]
+                        with torch.no_grad():
+                            pred_chunk = solve_ode_forward(x0_chunk, unet, theta_chunk, device)
+                        pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
+                    maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
+                    maps_ref = batch_pqm['x1'].detach().cpu().squeeze(1).numpy()  # (B, H, W)
+
+                    chi2_unet, fig_unet = pqm_evaluate(maps_ref, maps_gen)
+                    fig_unet.suptitle(f"PQMass: N-body vs UNet (epoch {epoch})", fontsize=13)
+
+                    pqm_unet_path = fig_dir / f"pqm_unet_epoch_{epoch}.png"
+                    fig_unet.savefig(pqm_unet_path, dpi=150, bbox_inches="tight")
+                    plt.close(fig_unet)
+
+                    wandb.log({
+                        "pqm/chi2_unet_mean": float(np.mean(chi2_unet)),
+                        "pqm/plot_unet": wandb.Image(str(pqm_unet_path), caption=f"PQMass N-body vs UNet epoch {epoch}"),
+                        "epoch": epoch,
+                    })
+                except Exception as e:
+                    print(f"PQMass evaluation failed: {e}")
 
 
 # Final trained model
