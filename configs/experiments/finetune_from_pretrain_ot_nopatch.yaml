@@ -14,7 +14,7 @@ model:
     decay_rate: 0.8
     decay_every_epochs: 1
     dropout_rate: 0.1
-    loss_type: "score"
+    loss_type: "log_prob"
     # freeze_backbone: true  # Freeze backbone and ps_head, only train final head
     pretrained_checkpoint_path: "checkpoints/last.ckpt"  # if downloaded from wandb, use /artifacts/model-m4yzfuvd:v0/model.ckpt
 
