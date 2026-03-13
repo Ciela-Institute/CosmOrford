@@ -1,5 +1,5 @@
 model:
-  class_path: cosmoford.models.RegressionModel
+  class_path: cosmoford.models_nopatch.RegressionModelNoPatch
   init_args:
     backbone: "efficientnet_v2_s"
     warmup_steps: 500
@@ -7,7 +7,7 @@ model:
     decay_rate: 0.85
     decay_every_epochs: 1
     dropout_rate: 0.2
-    loss_type: "score"
+    loss_type: "log_prob"
 
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
@@ -17,7 +17,7 @@ data:
     # train_on_full_data: true
 
 trainer:
-  max_epochs: 30
+  max_epochs: 200
   accelerator: gpu
   precision: "16-mixed"
   log_every_n_steps: 1
@@ -29,7 +29,7 @@ trainer:
     - class_path: EMAWeightAveraging
     - class_path: ModelCheckpoint
       init_args:
-        monitor: "val_score"
+        monitor: "val_log_prob"
         mode: "max"
         save_top_k: 3
         save_last: true
@@ -37,6 +37,6 @@ trainer:
     class_path: WandbLogger
     init_args:
       name: "efficientnet_v2_s"
-      project: "neurips-wl-challenge-whatworks"
+      project: "neurips-wl-challenge"
       entity: "cosmostat"
       log_model: true
