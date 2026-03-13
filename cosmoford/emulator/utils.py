@@ -1,5 +1,8 @@
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+from scipy.stats import chi2 as chi2_dist
+from pqm import pqm_chi2
 from cosmoford import SURVEY_MASK
 from cosmoford.dataset import reshape_field_numpy
 
@@ -108,3 +111,45 @@ def apply_mask(x, vmask=None, hmask=None):
         mask = mask[..., None]
 
     return x * mask
+
+
+def pqm_evaluate(maps_ref, maps_gen, num_refs=100, re_tessellation=20):
+    """Compare two sets of maps using PQMass.
+
+    Parameters
+    ----------
+    maps_ref : np.ndarray, shape (N, H, W)
+        Reference maps (e.g., N-body validation set).
+    maps_gen : np.ndarray, shape (M, H, W)
+        Generated maps (e.g., UNet ODE output).
+    num_refs : int
+        Number of reference cells for the Voronoi tessellation.
+    re_tessellation : int
+        Number of independent tessellations; returns a distribution of chi².
+
+    Returns
+    -------
+    chi2_vals : list of float
+        Chi² values, one per tessellation.
+    fig : matplotlib.figure.Figure
+        Histogram of chi² values vs the expected chi²(dof=num_refs-1) PDF.
+    """
+    ref_flat = maps_ref.reshape(len(maps_ref), -1).astype(np.float32)
+    gen_flat = maps_gen.reshape(len(maps_gen), -1).astype(np.float32)
+
+    chi2_vals = pqm_chi2(ref_flat, gen_flat, num_refs=num_refs, re_tessellation=re_tessellation)
+
+    dof = num_refs - 1
+    x = np.linspace(max(0, dof - 4 * np.sqrt(2 * dof)), dof + 6 * np.sqrt(2 * dof), 300)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(chi2_vals, bins=15, density=True, alpha=0.7, color="steelblue", label="PQMass χ²")
+    ax.plot(x, chi2_dist.pdf(x, df=dof), "r-", lw=2, label=f"χ²(dof={dof})")
+    ax.axvline(np.mean(chi2_vals), color="steelblue", linestyle="--", lw=1.5,
+               label=f"mean = {np.mean(chi2_vals):.1f}")
+    ax.set_xlabel("χ² statistic")
+    ax.set_ylabel("Density")
+    ax.legend(fontsize=10)
+    ax.set_title("PQMass — χ² distribution")
+
+    return chi2_vals, fig
