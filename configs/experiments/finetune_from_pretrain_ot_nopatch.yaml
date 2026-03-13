@@ -14,7 +14,7 @@ model:
     decay_rate: 0.8
     decay_every_epochs: 1
     dropout_rate: 0.1
-    loss_type: "score"
+    loss_type: "log_prob"
     # freeze_backbone: true  # Freeze backbone and ps_head, only train final head
     pretrained_checkpoint_path: "checkpoints/last.ckpt"  # if downloaded from wandb, use /artifacts/model-m4yzfuvd:v0/model.ckpt
 
@@ -39,8 +39,8 @@ trainer:
     - class_path: ModelCheckpoint
       init_args:
         dirpath: "checkpoints/" 
-        monitor: "val_score"
-        mode: "max"
+        monitor: "val_log_prob"
+        mode: "min"
         save_top_k: 3
         save_last: true
         filename: "finetune-{epoch:02d}-{val_score:.4f}"
