@@ -1,6 +1,7 @@
 import argparse
 import math
 import re
+import ast
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,6 +14,31 @@ from tqdm import tqdm
 def _extract_seed(filename: str):
     match = re.search(r"seed=(\d+)", filename)
     return int(match.group(1)) if match else None
+
+
+def _parse_seed_selection(seed_arg: str):
+    if seed_arg is None:
+        return None
+
+    seed_arg = seed_arg.strip()
+    if not seed_arg:
+        return None
+
+    try:
+        parsed = ast.literal_eval(seed_arg)
+        if isinstance(parsed, int):
+            return [parsed]
+        if isinstance(parsed, (list, tuple, set)):
+            return [int(x) for x in parsed]
+    except (ValueError, SyntaxError):
+        pass
+
+    if "," in seed_arg:
+        parts = [p.strip() for p in seed_arg.split(",") if p.strip()]
+    else:
+        parts = [p.strip() for p in seed_arg.split() if p.strip()]
+
+    return [int(p) for p in parts]
 
 
 def _load_one_npz(path: Path):
@@ -41,13 +67,17 @@ def _normalize_shapes(maps, theta, file_path: Path):
 
 
 def _load_and_prepare(fp: Path):
-    maps, theta = _load_one_npz(fp)
-    maps, theta = _normalize_shapes(maps, theta, fp)
+    try:
+        maps, theta = _load_one_npz(fp)
+        maps, theta = _normalize_shapes(maps, theta, fp)
 
-    n_patch = maps.shape[0]
-    theta_rep = np.repeat(theta[np.newaxis, :], n_patch, axis=0)
+        n_patch = maps.shape[0]
+        theta_rep = np.repeat(theta[np.newaxis, :], n_patch, axis=0)
 
-    return maps.astype(np.float16, copy=False), theta_rep.astype(np.float16, copy=False)
+        return maps.astype(np.float16, copy=False), theta_rep.astype(np.float16, copy=False)
+    except Exception as exc:
+        print(f"WARNING: Failed to load {fp}: {exc}")
+        return None
 
 
 def main():
@@ -72,8 +102,12 @@ def main():
                         help="Disable sorting by seed in filenames")
     parser.add_argument("--limit", type=int, default=None,
                         help="Optional cap on number of files to load")
+    parser.add_argument("--seeds", type=str, default=None,
+                        help='Optional seed subset to include. Accepts "[1,2,3]", "1,2,3", or "1 2 3".')
     parser.add_argument("--start_chunk", type=int, default=0,
                         help="Start processing from this chunk index (0-based)")
+    parser.add_argument("--chunk_index_offset", type=int, default=0,
+                        help="Offset to apply to chunk ids when saving (naming only)")
     parser.add_argument("--no_chunk_save", action="store_true",
                         help="Disable saving per-chunk datasets to disk")
     parser.add_argument("--chunk_only", action="store_true",
@@ -83,6 +117,8 @@ def main():
     parser.add_argument("--chunks_dir", type=str, default=None,
                         help="Optional override for chunks directory (defaults to output_dir/dataset_name/chunks)")
     args = parser.parse_args()
+
+    selected_seeds = _parse_seed_selection(args.seeds)
 
     if args.from_chunks:
         chunks_root = Path(args.chunks_dir) if args.chunks_dir else Path(args.output_dir) / args.dataset_name / "chunks"
@@ -95,9 +131,24 @@ def main():
 
         datasets_list = []
         for p in tqdm(chunk_dirs, desc="Loading chunk datasets"):
-            datasets_list.append(datasets.load_from_disk(str(p)))
+            try:
+                datasets_list.append(datasets.load_from_disk(str(p)))
+            except Exception as exc:
+                print(f"WARNING: Failed to load chunk dataset {p}: {exc}")
+
+        if not datasets_list:
+            raise ValueError(f"No chunk datasets could be loaded from: {chunks_root}")
 
         dataset = datasets.concatenate_datasets(datasets_list)
+        if selected_seeds is not None:
+            if "seed" not in dataset.column_names:
+                raise ValueError(
+                    "--seeds requires a 'seed' column in chunk datasets. "
+                    "Rebuild chunks with seed saved or filter at the .npz stage."
+                )
+            seed_set = set(int(s) for s in selected_seeds)
+            dataset = dataset.filter(lambda ex: int(ex["seed"]) in seed_set)
+
         dataset = dataset.train_test_split(test_size=args.test_size, seed=args.seed)
 
         output_dir = Path(args.output_dir)
@@ -123,6 +174,26 @@ def main():
     if args.limit is not None:
         files = files[:args.limit]
 
+    if selected_seeds is not None:
+        requested_set = set(int(s) for s in selected_seeds)
+        filtered = []
+        found_set = set()
+        for p in files:
+            seed = _extract_seed(p.name)
+            if seed is None:
+                continue
+            if seed in requested_set:
+                filtered.append(p)
+                found_set.add(seed)
+
+        missing = sorted(requested_set - found_set)
+        if missing:
+            print(f"WARNING: {len(missing)} requested seeds were not found in files: {missing}")
+
+        files = filtered
+        if not files:
+            raise FileNotFoundError("No files matched the requested seeds.")
+
     num_files = len(files)
     num_chunks = math.ceil(num_files / args.chunk_size)
 
@@ -143,17 +214,23 @@ def main():
 
         if args.num_workers <= 1:
             for fp in tqdm(chunk_files, desc="Loading files", leave=False):
-                maps, theta_rep = _load_and_prepare(fp)
+                result = _load_and_prepare(fp)
+                if result is None:
+                    continue
+                maps, theta_rep = result
                 chunk_maps.append(maps)
                 chunk_thetas.append(theta_rep)
         else:
             with ThreadPoolExecutor(max_workers=args.num_workers) as pool:
-                for maps, theta_rep in tqdm(
+                for result in tqdm(
                     pool.map(_load_and_prepare, chunk_files),
                     total=len(chunk_files),
                     desc="Loading files",
                     leave=False,
                 ):
+                    if result is None:
+                        continue
+                    maps, theta_rep = result
                     chunk_maps.append(maps)
                     chunk_thetas.append(theta_rep)
 
@@ -179,7 +256,8 @@ def main():
         if not args.no_chunk_save:
             chunks_root = Path(args.output_dir) / args.dataset_name / "chunks"
             chunks_root.mkdir(parents=True, exist_ok=True)
-            chunk_path = chunks_root / f"chunk_{chunk_idx:04d}"
+            chunk_id = chunk_idx + args.chunk_index_offset
+            chunk_path = chunks_root / f"chunk_{chunk_id:04d}"
             chunk_dataset.save_to_disk(str(chunk_path))
             chunk_paths.append(str(chunk_path))
 
