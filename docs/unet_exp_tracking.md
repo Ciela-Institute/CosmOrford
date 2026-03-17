@@ -104,7 +104,7 @@ to narrow candidates before submitting 24h training jobs.
 
 **Full diagnostic results (job 8412161):**
 
-![OT diagnostic figure](/home/juzgh/links/projects/ctb-lplevass/juzgh/CosmOrford/docs/figs/ot_diagnostic.png)
+![OT diagnostic figure](figs/ot_diagnostic.png)
 
 **Conclusions:**
 
@@ -142,13 +142,13 @@ to narrow candidates before submitting 24h training jobs.
 
 | p1_emd | p1_sink_1e-3 |
 |--------|-------------|
-| ![](/lustre09/project/6091102/juzgh/CosmOrford/docs/figs/ps_p1_emd_best_summary.png) | ![](/lustre09/project/6091102/juzgh/CosmOrford/docs/figs/ps_p1_sink_1e-3_best_summary.png) |
+| ![](figs/ps_p1_emd_best_summary.png) | ![](figs/ps_p1_sink_1e-3_best_summary.png) |
 
 **Pixel PDF (best checkpoint):**
 
 | p1_emd | p1_sink_1e-3 |
 |--------|-------------|
-| ![](/lustre09/project/6091102/juzgh/CosmOrford/docs/figs/pdf_p1_emd_best.png) | ![](/lustre09/project/6091102/juzgh/CosmOrford/docs/figs/pdf_p1_sink_1e-3_best.png) |
+| ![](figs/pdf_p1_emd_best.png) | ![](figs/pdf_p1_sink_1e-3_best.png) |
 
 **Decision: proceed with EMD** — χ²_best=113.6 (emd) vs sinkhorn still training; emd shows sharper PS correction toward N-body. Phase 2 uses `ot_method: emd, eps: 0.001`.
 
