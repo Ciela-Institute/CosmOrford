@@ -44,13 +44,13 @@ class NPEConfig:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
-def find_best_checkpoint(budget: int, checkpoints_path: Path) -> str:
+def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = False) -> str:
     """Find the best compressor checkpoint for a given budget.
 
     Strategy:
     1. Parse val_mse from Lightning checkpoint filenames, pick lowest
     2. Fall back to last.ckpt
-    3. Fall back to W&B artifact download
+    3. Fall back to W&B artifact download (skipped when offline=True)
     """
     import re
 
@@ -80,6 +80,12 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path) -> str:
             print(f"Using last.ckpt for budget-{budget}")
             return str(last_ckpt)
 
+    if offline:
+        raise FileNotFoundError(
+            f"No local checkpoint found for budget-{budget} in {checkpoint_dir} "
+            f"and --offline is set (W&B download disabled)."
+        )
+
     # Strategy 3: W&B fallback
     print(f"No local checkpoint for budget-{budget}, trying W&B...")
     import wandb
@@ -100,7 +106,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path) -> str:
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, vol, load_holdout, cfg: NPEConfig):
+def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, vol, load_holdout, cfg: NPEConfig, offline: bool = False):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -111,6 +117,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         vol: object with .reload() and .commit() (modal.Volume or noop)
         load_holdout: callable(split: str) -> HuggingFace Dataset
         cfg: NPEConfig with all training hyperparameters
+        offline: if True, disable W&B checkpoint fallback and raise if no local checkpoint found
     """
     import json
 
@@ -146,7 +153,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         print("No cached summaries found, computing from scratch...")
 
         # ── 1. Load frozen compressor ──
-        ckpt_path = find_best_checkpoint(budget, checkpoints_path)
+        ckpt_path = find_best_checkpoint(budget, checkpoints_path, offline=offline)
         compressor = RegressionModelNoPatch.load_from_checkpoint(ckpt_path, map_location=device)
         compressor.eval()
         compressor.to(device)
@@ -487,6 +494,9 @@ if __name__ == "__main__":
     parser.add_argument("--budgets",
                         help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
                              "(overrides the budgets list in the config file)")
+    parser.add_argument("--offline", action="store_true",
+                        help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
+                             "is not found locally")
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
@@ -504,4 +514,5 @@ if __name__ == "__main__":
             type("_Noop", (), {"reload": lambda s: None, "commit": lambda s: None})(),
             lambda split, ds=holdout_ds: ds[split],
             cfg,
+            offline=args.offline,
         )
