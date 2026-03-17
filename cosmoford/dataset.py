@@ -1,6 +1,7 @@
+import os
 import torch
 import lightning as L
-from datasets import load_dataset, concatenate_datasets, Dataset
+from datasets import load_dataset, load_from_disk, concatenate_datasets, Dataset
 from torch.utils.data import DataLoader
 from cosmoford import THETA_MEAN, THETA_STD
 import numpy as np
@@ -68,9 +69,12 @@ def inverse_reshape_field_numpy(kappa_reduced, fill_value: float = 0.0):
     return kappa_full
 
 
+DEFAULT_DATA_DIR = "/project/rrg-lplevass/shared/wl_chall_data"
+
+
 class ChallengeDataModule(L.LightningDataModule):
     def __init__(self, batch_size=64, num_workers=8, train_on_full_data=False, dataset_mode="train",
-                 max_train_samples: int = 0):
+                 max_train_samples: int = 0, data_dir: str = DEFAULT_DATA_DIR, use_hub: bool = False):
         """
         Args:
             batch_size: Batch size for dataloaders
@@ -81,6 +85,8 @@ class ChallengeDataModule(L.LightningDataModule):
                 - "train": Use the regular training set from neurips-wl-challenge-flat
                 - "full": Use train + validation concatenated
             max_train_samples: If > 0, limit training set to this many samples
+            data_dir: Root directory for local datasets
+            use_hub: If True, load datasets from HuggingFace Hub instead of local disk
         """
         super().__init__()
         self.batch_size = batch_size
@@ -88,6 +94,8 @@ class ChallengeDataModule(L.LightningDataModule):
         self.train_on_full_data = train_on_full_data
         self.dataset_mode = dataset_mode
         self.max_train_samples = max_train_samples
+        self.data_dir = data_dir
+        self.use_hub = use_hub
 
     def _collate_fn(self, batch):
         # Run the default collate function
@@ -102,10 +110,37 @@ class ChallengeDataModule(L.LightningDataModule):
         theta = theta.float()
         return kappa, theta
 
+    def _load_main_dataset(self):
+        """Load the main neurips-wl-challenge-flat dataset."""
+        if self.use_hub:
+            dset = load_dataset("cosmostat/neurips-wl-challenge-flat")
+        else:
+            dset = load_from_disk(os.path.join(self.data_dir, "neurips-wl-challenge-flat"))
+        return dset.with_format("torch")
+
+    _HUB_PATHS = {
+        "GRF_HF": "CosmoStat/GRF_HF",
+    }
+
+    # Mapping from canonical dataset name to (local_dir_name, gcs_name)
+    _DATASET_NAMES = {
+        "gowerstreet_patches": ("gowerstreet-train", "gowerstreet_patches"),
+    }
+
+    def _load_auxiliary_dataset(self, name):
+        """Load an auxiliary dataset from local disk, or from HuggingFace Hub / GCS when use_hub is True."""
+        if self.use_hub:
+            if name in self._HUB_PATHS:
+                return load_dataset(self._HUB_PATHS[name], split="train")
+            gcs_name = self._DATASET_NAMES.get(name, (None, name))[1]
+            return Dataset.load_from_disk(f"gs://neurips-wl/datasets/{gcs_name}")
+        else:
+            local_name = self._DATASET_NAMES.get(name, (name, None))[0]
+            return load_from_disk(os.path.join(self.data_dir, local_name))
+
     def setup(self, stage=None):
         # Load the main dataset
-        dset = load_dataset("cosmostat/neurips-wl-challenge-flat")
-        dset = dset.with_format("torch")
+        dset = self._load_main_dataset()
 
         # Determine which dataset to use for training
         # Legacy: train_on_full_data overrides dataset_mode if True
@@ -116,7 +151,7 @@ class ChallengeDataModule(L.LightningDataModule):
         elif self.dataset_mode == "gowerstreet":
             # Load gowerstreet pretraining dataset
             print("Loading Gower Street pretraining dataset...")
-            dset_gowerstreet = Dataset.load_from_disk("gs://neurips-wl/datasets/gowerstreet_patches")
+            dset_gowerstreet = self._load_auxiliary_dataset("gowerstreet_patches")
             dset_gowerstreet = dset_gowerstreet.shuffle(seed=42)
             dset_gowerstreet = dset_gowerstreet.with_format("torch")
             self.train_dataset = dset_gowerstreet
@@ -125,7 +160,7 @@ class ChallengeDataModule(L.LightningDataModule):
         elif self.dataset_mode == "gowerstreet-train":
             # Load gowerstreet pretraining dataset
             print("Loading Gower Street pretraining dataset...")
-            dset_gowerstreet = Dataset.load_from_disk("gs://neurips-wl/datasets/gowerstreet_patches")
+            dset_gowerstreet = self._load_auxiliary_dataset("gowerstreet_patches")
             dset_gowerstreet = dset_gowerstreet.shuffle(seed=42)
             dset_gowerstreet = dset_gowerstreet.with_format("torch")
 
@@ -138,18 +173,25 @@ class ChallengeDataModule(L.LightningDataModule):
 
         elif self.dataset_mode == "lognormal":
             # Load lognormal pretraining dataset
-            dset_lognormal = Dataset.load_from_disk("gs://neurips-wl/datasets/lognormal")
+            dset_lognormal = self._load_auxiliary_dataset("lognormal")
             dset_lognormal = dset_lognormal.shuffle(seed=42)
             dset_lognormal = dset_lognormal.with_format("torch")
             self.train_dataset = dset_lognormal
             self.val_dataset = dset['validation']
         elif self.dataset_mode == "ot_emulated":
-            # Load lognormal pretraining dataset
-            dset_ot = Dataset.load_from_disk("gs://neurips-wl/datasets/ot_emulated")
+            # Load OT-emulated pretraining dataset
+            dset_ot = self._load_auxiliary_dataset("ot_emulated")
             dset_ot = dset_ot.rename_column('maps', 'kappa')
             dset_ot = dset_ot.shuffle(seed=42)
             dset_ot = dset_ot.with_format("torch")
             self.train_dataset = dset_ot
+            self.val_dataset = dset['validation']
+        elif self.dataset_mode == "grf":
+            # Load Gaussian Random Field pretraining dataset
+            dset_grf = self._load_auxiliary_dataset("GRF_HF")
+            dset_grf = dset_grf.shuffle(seed=42)
+            dset_grf = dset_grf.with_format("torch")
+            self.train_dataset = dset_grf
             self.val_dataset = dset['validation']
         elif self.dataset_mode == "train":
             # Use regular training set

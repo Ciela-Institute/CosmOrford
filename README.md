@@ -46,6 +46,8 @@ Posterior samples are drawn for maps from the `fiducial` split of the holdout da
 | [`CosmoStat/neurips-wl-challenge-holdout`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-holdout) | `train` | NPE training (summaries precomputed with noise augmentation) |
 | [`CosmoStat/neurips-wl-challenge-holdout`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-holdout) | `fiducial` | FoM evaluation |
 
+⚠️ See below for how to access the datasets.
+
 ---
 
 ## 🗂️ Summary statistics strategies
@@ -132,6 +134,52 @@ pip install -e .
 ```
 
 Requires Python ≥ 3.8. Key dependencies: `torch`, `lightning`, `diffusers`, `torchdyn`, `nflows`, `datasets`, `wandb`.
+
+---
+
+## 📦 Dataset loading
+
+By default, datasets are loaded **locally** from `/project/rrg-lplevass/shared/wl_chall_data/` (on the Rorqual cluster). The expected directory structure is:
+
+```
+/project/rrg-lplevass/shared/wl_chall_data/
+├── neurips-wl-challenge-flat/   # Main challenge dataset (train/validation splits)
+├── lognormal/                   # LogNormal pretraining data
+├── gowerstreet-train/           # Gower Street pretraining data
+├── ot_emulated/                 # OT-emulated pretraining data
+└── GRF_HF/                     # Gaussian Random Field pretraining data
+```
+
+To **load from HuggingFace Hub / GCS** instead (e.g. when running outside the cluster), set `use_hub: true` in your config:
+
+```yaml
+data:
+  init_args:
+    use_hub: true
+```
+
+To use a **different local directory**, set `data_dir`:
+
+```yaml
+data:
+  init_args:
+    data_dir: /path/to/your/datasets
+```
+
+All options can also be passed as CLI overrides:
+
+```bash
+# Default: just pick a dataset mode (loads locally from the default path)
+trainer fit -c configs/experiments/efficientnet_v2_s.yaml --data.dataset_mode=lognormal
+
+# Load from HuggingFace Hub
+trainer fit -c configs/experiments/efficientnet_v2_s.yaml --data.use_hub=true
+
+# Load from a custom local path
+trainer fit -c configs/experiments/efficientnet_v2_s.yaml --data.data_dir=/scratch/datasets
+```
+
+Available `dataset_mode` values: `train`, `full`, `lognormal`, `gowerstreet`, `gowerstreet-train`, `ot_emulated`, `grf`.
 
 ---
 
