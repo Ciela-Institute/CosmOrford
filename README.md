@@ -46,6 +46,8 @@ Posterior samples are drawn for maps from the `fiducial` split of the holdout da
 | [`CosmoStat/neurips-wl-challenge-holdout`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-holdout) | `train` | NPE training (summaries precomputed with noise augmentation) |
 | [`CosmoStat/neurips-wl-challenge-holdout`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-holdout) | `fiducial` | FoM evaluation |
 
+⚠️ See below for how to access the datasets.
+
 ---
 
 ## 🗂️ Summary statistics strategies
