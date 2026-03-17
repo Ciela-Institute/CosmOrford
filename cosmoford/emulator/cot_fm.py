@@ -368,6 +368,42 @@ try:
 except Exception:
     pass
 
+print('--PQMass evaluation--')
+
+def _run_pqm(model, label, seed_data, seed_rng, fig_path, chi2_key, plot_key, extra_log=None):
+    try:
+        pqm_bs = 500
+        ds_logn = get_iterable_dataset(test_dataset_lognormal, pqm_bs, seed_data)
+        ds_nbody = get_iterable_dataset(test_dataset_nbody, pqm_bs, seed_data)
+        batch_logn = next(ds_logn)
+        batch_nbody = next(ds_nbody)
+        batch = get_ot_batch([batch_logn, batch_nbody], np.random.default_rng(seed_rng), eps, device, args.ot_reg, ot_method=args.ot_method)
+
+        chunks = []
+        for start in range(0, batch['x0'].shape[0], micro_bs):
+            x0_c = batch['x0'][start:start + micro_bs]
+            theta_c = batch['theta_x0'][start:start + micro_bs]
+            with torch.no_grad():
+                pred_c = solve_ode_forward(x0_c, model, theta_c, device)
+            chunks.append(pred_c[-1])
+        maps_gen = np.concatenate(chunks, axis=0)
+        maps_ref = batch['x1'].detach().cpu().squeeze(1).numpy()
+
+        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen)
+        fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log = {
+            chi2_key: float(np.mean(chi2_vals)),
+            plot_key: wandb.Image(str(fig_path), caption=f"PQMass N-body vs UNet ({label})"),
+        }
+        if extra_log:
+            log.update(extra_log)
+        wandb.log(log)
+        print(f"PQMass [{label}]: mean χ² = {np.mean(chi2_vals):.1f}")
+    except Exception as e:
+        print(f"PQMass [{label}] failed: {e}")
+
 print('--Training--')
 
 eps = args.eps
@@ -513,38 +549,12 @@ for epoch in tqdm(range(num_epochs)):
                 plt.close(fig)
 
                 # PQMass evaluation: N-body vs UNet
-                try:
-                    pqm_bs = 500
-                    ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, pqm_bs, 99)
-                    ds_pqm_nbody = get_iterable_dataset(test_dataset_nbody, pqm_bs, 99)
-                    batch_pqm_logn = next(ds_pqm_logn)
-                    batch_pqm_nbody = next(ds_pqm_nbody)
-                    batch_pqm = get_ot_batch([batch_pqm_logn, batch_pqm_nbody], np.random.default_rng(0), eps, device, args.ot_reg, ot_method=args.ot_method)
-
-                    pqm_chunks = []
-                    for start in range(0, batch_pqm['x0'].shape[0], micro_bs):
-                        x0_chunk = batch_pqm['x0'][start:start + micro_bs]
-                        theta_chunk = batch_pqm['theta_x0'][start:start + micro_bs]
-                        with torch.no_grad():
-                            pred_chunk = solve_ode_forward(x0_chunk, unet, theta_chunk, device)
-                        pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
-                    maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
-                    maps_ref = batch_pqm['x1'].detach().cpu().squeeze(1).numpy()  # (B, H, W)
-
-                    chi2_unet, fig_unet = pqm_evaluate(maps_ref, maps_gen)
-                    fig_unet.suptitle(f"PQMass: N-body vs UNet (epoch {epoch})", fontsize=13)
-
-                    pqm_unet_path = fig_dir / f"pqm_unet_epoch_{epoch}.png"
-                    fig_unet.savefig(pqm_unet_path, dpi=150, bbox_inches="tight")
-                    plt.close(fig_unet)
-
-                    wandb.log({
-                        "pqm/chi2_unet_mean": float(np.mean(chi2_unet)),
-                        "pqm/plot_unet": wandb.Image(str(pqm_unet_path), caption=f"PQMass N-body vs UNet epoch {epoch}"),
-                        "epoch": epoch,
-                    })
-                except Exception as e:
-                    print(f"PQMass evaluation failed: {e}")
+                _run_pqm(
+                    unet, f"epoch {epoch}", 99, 0,
+                    fig_dir / f"pqm_unet_epoch_{epoch}.png",
+                    "pqm/chi2_unet_mean", "pqm/plot_unet",
+                    extra_log={"epoch": epoch},
+                )
 
 
 # Final trained model
@@ -558,45 +568,13 @@ except Exception:
     pass
 
 # Post-training PQMass: evaluate both last and best checkpoints on a fixed test set
-def _pqm_eval_checkpoint(model, label):
-    try:
-        pqm_bs = 500
-        ds_logn = get_iterable_dataset(test_dataset_lognormal, pqm_bs, 42)
-        ds_nbody = get_iterable_dataset(test_dataset_nbody, pqm_bs, 42)
-        batch_logn = next(ds_logn)
-        batch_nbody = next(ds_nbody)
-        batch = get_ot_batch([batch_logn, batch_nbody], np.random.default_rng(42), eps, device, args.ot_reg, ot_method=args.ot_method)
-
-        chunks = []
-        for start in range(0, batch['x0'].shape[0], micro_bs):
-            x0_c = batch['x0'][start:start + micro_bs]
-            theta_c = batch['theta_x0'][start:start + micro_bs]
-            with torch.no_grad():
-                pred_c = solve_ode_forward(x0_c, model, theta_c, device)
-            chunks.append(pred_c[-1])
-        maps_gen = np.concatenate(chunks, axis=0)
-        maps_ref = batch['x1'].detach().cpu().squeeze(1).numpy()
-
-        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen)
-        fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
-        path = fig_dir / f"pqm_final_{label}.png"
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        wandb.log({
-            f"pqm/chi2_{label}_mean": float(np.mean(chi2_vals)),
-            f"pqm/plot_{label}": wandb.Image(str(path), caption=f"PQMass N-body vs UNet ({label})"),
-        })
-        print(f"PQMass [{label}]: mean χ² = {np.mean(chi2_vals):.1f}")
-    except Exception as e:
-        print(f"PQMass [{label}] failed: {e}")
-
-_pqm_eval_checkpoint(unet, "last")
+_run_pqm(unet, "last", 42, 42, fig_dir / "pqm_final_last.png", "pqm/chi2_last_mean", "pqm/plot_last")
 
 best_ckpt_path = ckpt_dir / "unet_best.pth"
 if best_ckpt_path.exists():
     unet_best = build_unet2d_condition_with_y(config).to(device)
     unet_best.load_state_dict(torch.load(str(best_ckpt_path), map_location=device))
     unet_best.eval()
-    _pqm_eval_checkpoint(unet_best, "best")
+    _run_pqm(unet_best, "best", 42, 42, fig_dir / "pqm_final_best.png", "pqm/chi2_best_mean", "pqm/plot_best")
 
 wandb.finish()
