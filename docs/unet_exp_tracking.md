@@ -135,8 +135,8 @@ to narrow candidates before submitting 24h training jobs.
 
 | W&B run name | eps | ot_method | ot_reg | SLURM job | `pqm/chi2_best` | `val_loss` | Notes |
 |---|---|---|---|---|---|---|---|
-| `unet/phase1/sinkhorn_reg1e-3` | 0.001 | sinkhorn_log | 1e-3 | 8413661 | — (training) | — | [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/78t344gz) · soft plan, not bijective |
-| `unet/phase1/emd` | 0.001 | emd | — | 8413662 | **113.6** / last: 110.4 | 24.3 | [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fm5v6kxv) · exact bijection per step, H=6.2 |
+| `unet/phase1/sinkhorn_reg1e-3` | 0.001 | sinkhorn_log | 1e-3 | 8413661 | — (training) | — | [config](../configs/experiments/unet_exp/phase1_sinkhorn_reg1e-3.yaml) · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/78t344gz) · soft plan, not bijective |
+| `unet/phase1/emd` | 0.001 | emd | — | 8413662 | **113.6** / last: 110.4 | 24.3 | [config](../configs/experiments/unet_exp/phase1_emd.yaml) · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fm5v6kxv) · exact bijection per step, H=6.2 |
 
 **Power spectrum (best checkpoint):**
 
@@ -160,9 +160,21 @@ to narrow candidates before submitting 24h training jobs.
 
 | W&B run name | Channels | Config | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
 |--------------|----------|--------|-----------|-----------------|-----------------|------------|-------|
-| `unet/phase2/arch_small` | [16, 32] | phase2_arch_small.yaml | 8450407 | — | — | — | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/xlwuyvlw) |
+| `unet/phase2/arch_small` | [16, 32] | [config](../configs/experiments/unet_exp/phase2_arch_small.yaml) | 8450407 | — | — | — | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/xlwuyvlw) |
 | `unet/phase2/arch_medium` | [32, 64, 128] | — | — | **113.6** | 110.4 | 24.3 | reuse p1_emd · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fm5v6kxv) |
-| `unet/phase2/arch_large` | [32, 64, 128, 256] | phase2_arch_large.yaml | 8450409 | — | — | — | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/g3a5sswy) |
+| `unet/phase2/arch_large` | [32, 64, 128, 256] | [config](../configs/experiments/unet_exp/phase2_arch_large.yaml) | 8450409 | — | — | — | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/g3a5sswy) |
+
+**Power spectrum (best checkpoint):**
+
+| p2_arch_small | p2_arch_medium (= p1_emd) | p2_arch_large |
+|---|---|---|
+| ![](figs/ps_p2_arch_small_best_summary.png) | ![](figs/ps_p1_emd_best_summary.png) | _TBD_ |
+
+**Pixel PDF (best checkpoint):**
+
+| p2_arch_small | p2_arch_medium (= p1_emd) | p2_arch_large |
+|---|---|---|
+| ![](figs/pdf_p2_arch_small_best.png) | ![](figs/pdf_p1_emd_best.png) | _TBD_ |
 
 **Best architecture:** _TBD_
 
@@ -174,9 +186,9 @@ to narrow candidates before submitting 24h training jobs.
 
 | W&B run name | `sigma` | Config | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
 |--------------|---------|--------|-----------|-----------------|-----------------|------------|-------|
-| `unet/phase3/sigma_1e-4` | 0.0001 | phase3_sigma_1e-4.yaml | — | — | — | — | |
-| `unet/phase3/sigma_1e-3` | 0.001 | phase3_sigma_1e-3.yaml | — | — | — | — | baseline |
-| `unet/phase3/sigma_1e-2` | 0.01 | phase3_sigma_1e-2.yaml | — | — | — | — | |
+| `unet/phase3/sigma_1e-4` | 0.0001 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-4.yaml) | — | — | — | — | |
+| `unet/phase3/sigma_1e-3` | 0.001 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-3.yaml) | — | — | — | — | baseline |
+| `unet/phase3/sigma_1e-2` | 0.01 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-2.yaml) | — | — | — | — | |
 
 **Best sigma:** _TBD_
 
@@ -188,9 +200,9 @@ to narrow candidates before submitting 24h training jobs.
 
 | W&B run name | `base_lr` | `gamma` | `num_epochs` | Config | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
 |--------------|-----------|---------|--------------|--------|-----------|-----------------|-----------------|------------|-------|
-| `unet/phase4/lr_gamma09_100ep` | 1e-3 | 0.9 | 100 | phase4_lr_gamma09_100ep.yaml | — | — | — | — | baseline |
-| `unet/phase4/lr_gamma095_150ep` | 1e-3 | 0.95 | 150 | phase4_lr_gamma095_150ep.yaml | — | — | — | — | slower decay |
-| `unet/phase4/lr_gamma099_150ep` | 5e-4 | 0.99 | 150 | phase4_lr_gamma099_150ep.yaml | — | — | — | — | nearly flat |
+| `unet/phase4/lr_gamma09_100ep` | 1e-3 | 0.9 | 100 | [config](../configs/experiments/unet_exp/phase4_lr_gamma09_100ep.yaml) | — | — | — | — | baseline |
+| `unet/phase4/lr_gamma095_150ep` | 1e-3 | 0.95 | 150 | [config](../configs/experiments/unet_exp/phase4_lr_gamma095_150ep.yaml) | — | — | — | — | slower decay |
+| `unet/phase4/lr_gamma099_150ep` | 5e-4 | 0.99 | 150 | [config](../configs/experiments/unet_exp/phase4_lr_gamma099_150ep.yaml) | — | — | — | — | nearly flat |
 
 **Best LR schedule:** _TBD_
 
