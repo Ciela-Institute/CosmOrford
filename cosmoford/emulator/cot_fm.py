@@ -44,50 +44,17 @@ plt.rcParams.update({
 })
 
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--seed",
-    type=int,
-    default=42,
-    help="Random seed for initialization",
-)
-# Weights & Biases configuration
-parser.add_argument("--wandb_project", type=str, default="neurips-wl-challenge", help="wandb project name")
-parser.add_argument("--wandb_run_name", type=str, default=None, help="wandb run name (optional)")
-parser.add_argument("--wandb_entity", type=str, default="justinezgh", help="wandb entity (team/user), optional")
-parser.add_argument("--wandb_mode", type=str, default="offline", choices=["online", "offline", "disabled"], help="wandb mode")
-parser.add_argument("--disable_wandb", action="store_true", help="Disable wandb logging regardless of mode")
-parser.add_argument("--config_yaml", type=str, default=None, help="Path to UNet YAML config; overrides default if provided")
-# Optional overrides for training hyperparameters
-parser.add_argument("--eps", type=float, default=0.1, help="OT epsilon (override)")
-parser.add_argument("--num_epochs", type=int, default=50, help="Training epochs (override)")
-parser.add_argument("--batch_size", type=int, default=300, help="Batch size (override)")
-parser.add_argument("--sigma", type=float, default=0.001, help="Noise sigma (override)")
-parser.add_argument(
-    "--micro_batch_size",
-    type=int,
-    default=20,
-    help="Optional micro-batch size for inner loop; 0 disables micro-splitting",
-)
-parser.add_argument("--base_lr", type=float, default=5e-4, help="Base learning rate (override)")
-parser.add_argument("--gamma", type=float, default=0.9, help="Exponential LR decay factor (override)")
-parser.add_argument("--ot_reg", type=float, default=0.05, help="Sinkhorn regularization for GPU OT")
-parser.add_argument("--ot_method", type=str, default="sinkhorn", choices=["sinkhorn", "emd"], help="OT solver: sinkhorn (fast, regularized) or emd (exact LP)")
-parser.add_argument("--dataset_dir_nbody", type=str, default=None, help="Path to local neurips-wl-challenge-flat DatasetDict (load_from_disk); falls back to HF Hub if not set")
-parser.add_argument("--dataset_dir_logn_train", type=str, default=None, help="Path to lognormal training dataset")
-parser.add_argument("--dataset_dir_logn_val", type=str, default=None, help="Path to lognormal validation dataset")
-parser.add_argument("--exp_config", type=str, default=None, help="Path to experiment YAML; values used as defaults, overridden by any explicit CLI args")
+parser.add_argument("--exp_config", type=str, required=True, help="Path to experiment YAML")
+cli = parser.parse_args()
 
-# Pre-parse exp_config and inject as parser defaults so CLI args still override
-_pre = argparse.ArgumentParser(add_help=False)
-_pre.add_argument("--exp_config", type=str, default=None)
-_pre_args, _ = _pre.parse_known_args()
-if _pre_args.exp_config is not None:
-    with open(_pre_args.exp_config) as _f:
-        _exp_cfg = yaml.safe_load(_f)
-    _exp_cfg.pop("exp_name", None)  # not an argparse arg
-    parser.set_defaults(**_exp_cfg)
+with open(cli.exp_config) as f:
+    _cfg = yaml.safe_load(f)
+_cfg.pop("exp_name", None)
 
-args = parser.parse_args()
+# Defaults for fields not expected in the YAML
+_defaults = {"seed": 42}
+_defaults.update(_cfg)
+args = argparse.Namespace(**_defaults)
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
@@ -105,15 +72,11 @@ train_dataset_nbody = dset_nbody['train']
 test_dataset_nbody = dset_nbody['validation']
 
 dataset_lognormal = load_from_disk(args.dataset_dir_logn_train)
-if args.dataset_dir_logn_val is not None:
-    train_dataset_lognormal = dataset_lognormal.with_format('numpy')
-    test_dataset_lognormal = load_from_disk(args.dataset_dir_logn_val).with_format('numpy')
-else:
-    n = len(dataset_lognormal)
-    perm = np.random.default_rng(2).permutation(n).tolist()
-    n_test = int(0.2 * n)
-    train_dataset_lognormal = dataset_lognormal.select(perm[n_test:], keep_in_memory=True).with_format('numpy')
-    test_dataset_lognormal = dataset_lognormal.select(perm[:n_test], keep_in_memory=True).with_format('numpy')
+n = len(dataset_lognormal)
+perm = np.random.default_rng(2).permutation(n).tolist()
+n_test = int(0.2 * n)
+train_dataset_lognormal = dataset_lognormal.select(perm[n_test:], keep_in_memory=True).with_format('numpy')
+test_dataset_lognormal = dataset_lognormal.select(perm[:n_test], keep_in_memory=True).with_format('numpy')
 
 print("train_dataset_lognormal", train_dataset_lognormal)
 print("test_dataset_lognormal", test_dataset_lognormal)
