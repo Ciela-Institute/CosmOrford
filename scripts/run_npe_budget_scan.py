@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import List
 
 
+
 @dataclass
 class NPEConfig:
     budgets: List[int] = field(default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200])
@@ -106,7 +107,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, vol, load_holdout, cfg: NPEConfig, offline: bool = False):
+def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -114,10 +115,10 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         checkpoints_path: Path to compressor checkpoints root
         npe_results_path: Path where NPE results will be written
         summaries_cache_path: Path for caching pre-computed summaries
-        vol: object with .reload() and .commit() (modal.Volume or noop)
         load_holdout: callable(split: str) -> HuggingFace Dataset
         cfg: NPEConfig with all training hyperparameters
         offline: if True, disable W&B checkpoint fallback and raise if no local checkpoint found
+        vol: optional modal.Volume; if provided, .reload()/.commit() are called around I/O
     """
     import json
 
@@ -134,7 +135,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     print(f"{'='*60}")
     print(f"Config: {cfg}")
 
-    vol.reload()
+    if vol is not None:
+        vol.reload()
 
     # ── 1-3. Load or compute summaries ──
     cache_dir = summaries_cache_path / f"budget-{budget}"
@@ -213,7 +215,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             "compressor_checkpoint": ckpt_path,
             "n_noise_realizations": cfg.n_noise_realizations,
         }, cache_file)
-        vol.commit()
+        if vol is not None:
+            vol.commit()
         print(f"Cached summaries to {cache_file}")
 
     print(f"Summary dataset: {summaries_tensor.shape[0]} pairs")
@@ -435,9 +438,9 @@ if __name__ != "__main__":
             CHECKPOINTS_PATH,
             NPE_RESULTS_PATH,
             SUMMARIES_CACHE_PATH,
-            volume,
             lambda split: _hf_load("CosmoStat/neurips-wl-challenge-holdout", split=split),
             cfg,
+            vol=volume,
         )
 
     @app.function(
@@ -511,7 +514,6 @@ if __name__ == "__main__":
             Path(args.checkpoints_path),
             Path(args.npe_results_path),
             Path(args.summaries_cache_path),
-            type("_Noop", (), {"reload": lambda s: None, "commit": lambda s: None})(),
             lambda split, ds=holdout_ds: ds[split],
             cfg,
             offline=args.offline,
