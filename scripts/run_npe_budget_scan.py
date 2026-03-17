@@ -1,4 +1,4 @@
-"""NPE training + FoM vs budget scan on Modal.
+"""NPE training + FoM vs budget scan.
 
 For each budget checkpoint from the compressor budget scan:
 1. Load frozen compressor
@@ -6,64 +6,45 @@ For each budget checkpoint from the compressor budget scan:
 3. Train NPE (conditional MAF) on (summary, theta) pairs
 4. Evaluate FoM at fiducial cosmology
 
-Usage:
+Usage (Modal):
     .venv/bin/modal run scripts/run_npe_budget_scan.py
+
+Usage (local):
+    python scripts/run_npe_budget_scan.py \\
+        --checkpoints_path /path/to/checkpoints \\
+        --npe_results_path /path/to/npe_results \\
+        --summaries_cache_path /path/to/summaries_cache \\
+        --holdout_path /path/to/neurips-wl-challenge-holdout \\
+        --config configs/experiments/npe_budget_scan.yaml \\
+        [--budgets 100,200,500]
+
+    All training hyperparameters are read from --config (YAML file).
 """
+from dataclasses import dataclass, field
 from pathlib import Path
-
-import modal
-
-volume = modal.Volume.from_name("cosmoford-training", create_if_missing=True)
-
-image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .uv_pip_install(
-        "torch>=2.4",
-        "torchvision>=0.19",
-        "lightning>=2.4",
-        "datasets",
-        "numpy",
-        "wandb",
-        "omegaconf",
-        "pyyaml",
-        "jsonargparse[signatures,omegaconf]>=4.27.7",
-        "peft",
-        "nflows",
-        "matplotlib",
-        "scikit-learn",
-    )
-    .add_local_dir("cosmoford", "/root/cosmoford", copy=True)
-    .add_local_dir("configs", "/root/configs", copy=True)
-    .add_local_file("pyproject.toml", "/root/pyproject.toml", copy=True)
-    .run_commands("cd /root && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e . --no-deps")
-)
-
-app = modal.App("cosmoford-npe-budget-scan", image=image)
-
-VOLUME_PATH = Path("/experiments")
-CHECKPOINTS_PATH = VOLUME_PATH / "checkpoints"
-NPE_RESULTS_PATH = VOLUME_PATH / "npe_results"
-SUMMARIES_CACHE_PATH = VOLUME_PATH / "summaries_cache"
-
-BUDGETS = [100, 200, 500, 1000, 2000, 5000, 10000, 20200]
-
-# NPE training hyperparameters
-N_NOISE_REALIZATIONS = 16
-NPE_EPOCHS = 500
-NPE_LR = 1e-3
-NPE_BATCH_SIZE = 512
-NPE_PATIENCE = 50
-NPE_SEEDS = 5
-
-# FoM evaluation parameters
-N_POSTERIOR_SAMPLES = 10_000
-
-# Fiducial cosmology (unnormalized)
-FIDUCIAL_OMEGA_M = 0.29
-FIDUCIAL_S8 = 0.81
+from typing import List
 
 
-def find_best_checkpoint(budget: int) -> str:
+@dataclass
+class NPEConfig:
+    budgets: List[int] = field(default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200])
+    n_noise_realizations: int = 16
+    npe_epochs: int = 500
+    npe_lr: float = 1e-3
+    npe_batch_size: int = 512
+    npe_patience: int = 50
+    npe_seeds: int = 5
+    n_posterior_samples: int = 10_000
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "NPEConfig":
+        import yaml
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+def find_best_checkpoint(budget: int, checkpoints_path: Path) -> str:
     """Find the best compressor checkpoint for a given budget.
 
     Strategy:
@@ -73,7 +54,7 @@ def find_best_checkpoint(budget: int) -> str:
     """
     import re
 
-    checkpoint_dir = CHECKPOINTS_PATH / f"budget-{budget}"
+    checkpoint_dir = checkpoints_path / f"budget-{budget}"
 
     # Strategy 1: Parse val_mse from checkpoint filenames
     if checkpoint_dir.exists():
@@ -112,7 +93,6 @@ def find_best_checkpoint(budget: int) -> str:
         for art in run.logged_artifacts():
             if art.type == "model":
                 art_dir = art.download(root=str(checkpoint_dir))
-                # Find the .ckpt file in the downloaded artifact
                 for f in Path(art_dir).glob("**/*.ckpt"):
                     print(f"Downloaded W&B artifact for budget-{budget}: {f}")
                     return str(f)
@@ -120,21 +100,22 @@ def find_best_checkpoint(budget: int) -> str:
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-@app.function(
-    volumes={VOLUME_PATH: volume},
-    gpu="a10g",
-    timeout=86400,
-    retries=modal.Retries(initial_delay=0.0, max_retries=0),
-    single_use_containers=True,
-    secrets=[modal.Secret.from_name("wandb-secret")],
-)
-def train_npe_for_budget(budget: int):
-    """End-to-end: load compressor, compute summaries, train NPE, evaluate FoM."""
+def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, vol, load_holdout, cfg: NPEConfig):
+    """Core NPE pipeline, independent of Modal or local execution.
+
+    Args:
+        budget: simulation budget
+        checkpoints_path: Path to compressor checkpoints root
+        npe_results_path: Path where NPE results will be written
+        summaries_cache_path: Path for caching pre-computed summaries
+        vol: object with .reload() and .commit() (modal.Volume or noop)
+        load_holdout: callable(split: str) -> HuggingFace Dataset
+        cfg: NPEConfig with all training hyperparameters
+    """
     import json
 
     import numpy as np
     import torch
-    from datasets import load_dataset
 
     from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD
     from cosmoford.dataset import reshape_field_numpy
@@ -144,12 +125,13 @@ def train_npe_for_budget(budget: int):
     print(f"\n{'='*60}")
     print(f"Budget {budget}: starting NPE pipeline")
     print(f"{'='*60}")
+    print(f"Config: {cfg}")
 
-    volume.reload()
+    vol.reload()
 
     # ── 1-3. Load or compute summaries ──
-    cache_dir = SUMMARIES_CACHE_PATH / f"budget-{budget}"
-    cache_file = cache_dir / f"summaries_n{N_NOISE_REALIZATIONS}.pt"
+    cache_dir = summaries_cache_path / f"budget-{budget}"
+    cache_file = cache_dir / f"summaries_n{cfg.n_noise_realizations}.pt"
     compressor = None  # loaded lazily for FoM eval
 
     if cache_file.exists():
@@ -164,7 +146,7 @@ def train_npe_for_budget(budget: int):
         print("No cached summaries found, computing from scratch...")
 
         # ── 1. Load frozen compressor ──
-        ckpt_path = find_best_checkpoint(budget)
+        ckpt_path = find_best_checkpoint(budget, checkpoints_path)
         compressor = RegressionModelNoPatch.load_from_checkpoint(ckpt_path, map_location=device)
         compressor.eval()
         compressor.to(device)
@@ -174,7 +156,7 @@ def train_npe_for_budget(budget: int):
 
         # ── 2. Load holdout dataset ──
         print("Loading holdout dataset...")
-        holdout = load_dataset("CosmoStat/neurips-wl-challenge-holdout", split="train")
+        holdout = load_holdout("train")
         holdout = holdout.with_format("numpy")
 
         kappa_all = np.array(holdout["kappa"])  # (N, 1424, 176)
@@ -192,7 +174,7 @@ def train_npe_for_budget(budget: int):
         mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
         # ── 3. Pre-compute summaries with noise augmentation ──
-        print(f"Pre-computing summaries ({N_NOISE_REALIZATIONS} noise realizations per map)...")
+        print(f"Pre-computing summaries ({cfg.n_noise_realizations} noise realizations per map)...")
         all_summaries = []
         all_thetas = []
 
@@ -201,7 +183,7 @@ def train_npe_for_budget(budget: int):
                 kappa_i = kappa_all[i]  # (1424, 176)
                 kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
 
-                for _ in range(N_NOISE_REALIZATIONS):
+                for _ in range(cfg.n_noise_realizations):
                     noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
                     noisy = (kappa_reshaped + noise) * mask
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
@@ -215,16 +197,16 @@ def train_npe_for_budget(budget: int):
         summaries_tensor = torch.cat(all_summaries, dim=0)  # (N*n_noise, 8)
         thetas_tensor = torch.from_numpy(np.array(all_thetas))  # (N*n_noise, 2)
 
-        # Cache to volume
+        # Cache to disk
         cache_dir.mkdir(parents=True, exist_ok=True)
         torch.save({
             "summaries": summaries_tensor,
             "thetas": thetas_tensor,
             "theta_all_raw": theta_all,
             "compressor_checkpoint": ckpt_path,
-            "n_noise_realizations": N_NOISE_REALIZATIONS,
+            "n_noise_realizations": cfg.n_noise_realizations,
         }, cache_file)
-        volume.commit()
+        vol.commit()
         print(f"Cached summaries to {cache_file}")
 
     print(f"Summary dataset: {summaries_tensor.shape[0]} pairs")
@@ -245,25 +227,25 @@ def train_npe_for_budget(budget: int):
 
     train_dataset = torch.utils.data.TensorDataset(s_train, t_train)
     val_dataset = torch.utils.data.TensorDataset(s_val, t_val)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=NPE_BATCH_SIZE, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=NPE_BATCH_SIZE)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.npe_batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.npe_batch_size)
 
     # ── 5. Train NPE (multiple seeds, keep best) ──
     overall_best_nll = float("inf")
     overall_best_state = None
 
-    for seed in range(NPE_SEEDS):
-        print(f"\n--- NPE seed {seed+1}/{NPE_SEEDS} ---")
+    for seed in range(cfg.npe_seeds):
+        print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
         torch.manual_seed(seed + 42)
         flow = build_flow(param_dim=2, context_dim=8).to(device)
-        optimizer = torch.optim.Adam(flow.parameters(), lr=NPE_LR)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NPE_EPOCHS)
+        optimizer = torch.optim.Adam(flow.parameters(), lr=cfg.npe_lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.npe_epochs)
 
         best_val_nll = float("inf")
         patience_counter = 0
         best_state = None
 
-        for epoch in range(NPE_EPOCHS):
+        for epoch in range(cfg.npe_epochs):
             # Train
             flow.train()
             train_losses = []
@@ -297,9 +279,9 @@ def train_npe_for_budget(budget: int):
 
             if (epoch + 1) % 50 == 0 or patience_counter == 0:
                 print(f"  Epoch {epoch+1:3d}: train_nll={mean_train:.4f}, val_nll={mean_val:.4f}, "
-                      f"best={best_val_nll:.4f}, patience={patience_counter}/{NPE_PATIENCE}")
+                      f"best={best_val_nll:.4f}, patience={patience_counter}/{cfg.npe_patience}")
 
-            if patience_counter >= NPE_PATIENCE:
+            if patience_counter >= cfg.npe_patience:
                 print(f"  Early stopping at epoch {epoch+1}")
                 break
 
@@ -313,7 +295,7 @@ def train_npe_for_budget(budget: int):
     flow.load_state_dict(overall_best_state)
     flow.eval()
     best_val_nll = overall_best_nll
-    print(f"\nOverall best val NLL across {NPE_SEEDS} seeds: {best_val_nll:.4f}")
+    print(f"\nOverall best val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f}")
 
     # ── 6. Compute FoM at fiducial cosmology ──
     print("Computing FoM (all fiducial maps)...")
@@ -328,7 +310,7 @@ def train_npe_for_budget(budget: int):
 
     # Load fiducial kappa maps directly (split='fiducial' contains only fiducial cosmology maps)
     print("Loading fiducial maps for FoM evaluation...")
-    holdout = load_dataset("CosmoStat/neurips-wl-challenge-holdout", split="fiducial")
+    holdout = load_holdout("fiducial")
     holdout = holdout.with_format("numpy")
     kappa_all_fom = np.array(holdout["kappa"])
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
@@ -348,7 +330,7 @@ def train_npe_for_budget(budget: int):
             s = compressor.compress(x)  # (1, 8)
 
             # Sample posterior
-            samples = flow.sample(N_POSTERIOR_SAMPLES, context=s)  # (1, N, 2)
+            samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
             samples = samples.squeeze(0).cpu().numpy()  # (N, 2)
 
             # Unnormalize to physical parameters
@@ -368,59 +350,158 @@ def train_npe_for_budget(budget: int):
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
 
     # ── 7. Save results ──
-    results_dir = NPE_RESULTS_PATH / f"budget-{budget}"
+    results_dir = npe_results_path / f"budget-{budget}"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save NPE weights
     torch.save(best_state, results_dir / "npe_flow.pt")
 
-    # Save FoM results
     results = {
         "budget": budget,
         "fom_mean": float(fom_mean),
         "fom_std": float(fom_std),
         "fom_values": [float(v) for v in fom_values],
         "best_val_nll": float(best_val_nll),
-        "n_noise_realizations": N_NOISE_REALIZATIONS,
+        "n_noise_realizations": cfg.n_noise_realizations,
         "n_fiducial_maps": len(kappa_all_fom),
-        "n_posterior_samples": N_POSTERIOR_SAMPLES,
+        "n_posterior_samples": cfg.n_posterior_samples,
         "compressor_checkpoint": ckpt_path,
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
-    volume.commit()
+    vol.commit()
     print(f"Results saved to {results_dir}")
     print(f"Budget {budget}: DONE (FoM = {fom_mean:.2f} ± {fom_std:.2f})")
     return results
 
 
-@app.function(
-    volumes={VOLUME_PATH: volume},
-    timeout=60,
-)
-def load_all_results() -> list[dict]:
-    """Load all saved NPE results from the volume (used by plotting script)."""
-    import json
+# ── Modal entry point (only loaded when invoked via `modal run`) ──────────────
+if __name__ != "__main__":
+    import modal
 
-    volume.reload()
-    results = []
-    if NPE_RESULTS_PATH.exists():
-        for d in sorted(NPE_RESULTS_PATH.iterdir()):
-            rfile = d / "results.json"
-            if rfile.exists():
-                results.append(json.loads(rfile.read_text()))
-    return results
+    volume = modal.Volume.from_name("cosmoford-training", create_if_missing=True)
+
+    image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .uv_pip_install(
+            "torch>=2.4",
+            "torchvision>=0.19",
+            "lightning>=2.4",
+            "datasets",
+            "numpy",
+            "wandb",
+            "omegaconf",
+            "pyyaml",
+            "jsonargparse[signatures,omegaconf]>=4.27.7",
+            "peft",
+            "nflows",
+            "matplotlib",
+            "scikit-learn",
+        )
+        .add_local_dir("cosmoford", "/root/cosmoford", copy=True)
+        .add_local_dir("configs", "/root/configs", copy=True)
+        .add_local_file("pyproject.toml", "/root/pyproject.toml", copy=True)
+        .run_commands("cd /root && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e . --no-deps")
+    )
+
+    app = modal.App("cosmoford-npe-budget-scan", image=image)
+
+    VOLUME_PATH = Path("/experiments")
+    CHECKPOINTS_PATH = VOLUME_PATH / "checkpoints"
+    NPE_RESULTS_PATH = VOLUME_PATH / "npe_results"
+    SUMMARIES_CACHE_PATH = VOLUME_PATH / "summaries_cache"
+
+    MODAL_CONFIG_PATH = "/root/configs/experiments/npe_budget_scan.yaml"
+
+    @app.function(
+        volumes={VOLUME_PATH: volume},
+        gpu="a10g",
+        timeout=86400,
+        retries=modal.Retries(initial_delay=0.0, max_retries=0),
+        single_use_containers=True,
+        secrets=[modal.Secret.from_name("wandb-secret")],
+    )
+    def train_npe_for_budget(budget: int):
+        from datasets import load_dataset as _hf_load
+        cfg = NPEConfig.from_yaml(MODAL_CONFIG_PATH)
+        return _train_budget_core(
+            budget,
+            CHECKPOINTS_PATH,
+            NPE_RESULTS_PATH,
+            SUMMARIES_CACHE_PATH,
+            volume,
+            lambda split: _hf_load("CosmoStat/neurips-wl-challenge-holdout", split=split),
+            cfg,
+        )
+
+    @app.function(
+        volumes={VOLUME_PATH: volume},
+        timeout=60,
+    )
+    def load_all_results() -> list[dict]:
+        import json
+        volume.reload()
+        results = []
+        if NPE_RESULTS_PATH.exists():
+            for d in sorted(NPE_RESULTS_PATH.iterdir()):
+                rfile = d / "results.json"
+                if rfile.exists():
+                    results.append(json.loads(rfile.read_text()))
+        return results
+
+    @app.local_entrypoint()
+    def main():
+        cfg = NPEConfig.from_yaml(MODAL_CONFIG_PATH)
+        handles = []
+        for n in cfg.budgets:
+            print(f"Spawning NPE pipeline for budget-{n}")
+            handles.append(train_npe_for_budget.spawn(n))
+
+        print(f"Waiting for {len(handles)} NPE runs to complete...")
+        for h in handles:
+            result = h.get()
+            print(f"  budget-{result['budget']}: FoM = {result['fom_mean']:.2f} ± {result['fom_std']:.2f}")
+        print("All NPE budget scan runs completed.")
 
 
-@app.local_entrypoint()
-def main():
-    handles = []
-    for n in BUDGETS:
-        print(f"Spawning NPE pipeline for budget-{n}")
-        handles.append(train_npe_for_budget.spawn(n))
 
-    print(f"Waiting for {len(handles)} NPE runs to complete...")
-    for h in handles:
-        result = h.get()
-        print(f"  budget-{result['budget']}: FoM = {result['fom_mean']:.2f} ± {result['fom_std']:.2f}")
-    print("All NPE budget scan runs completed.")
+# ── Local entry point ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import argparse
+
+    from datasets import load_from_disk
+
+    parser = argparse.ArgumentParser(
+        description="NPE budget scan — local cluster mode",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--checkpoints_path", required=True,
+                        help="Path to compressor checkpoints root (contains budget-N/ subdirs)")
+    parser.add_argument("--npe_results_path", required=True,
+                        help="Path where NPE results will be written")
+    parser.add_argument("--summaries_cache_path", required=True,
+                        help="Path for caching pre-computed summaries")
+    parser.add_argument("--holdout_path", required=True,
+                        help="Path to holdout DatasetDict (save_to_disk format, 'train' and 'fiducial' splits)")
+    parser.add_argument("--config", required=True,
+                        help="Path to YAML config file (configs/experiments/npe_budget_scan.yaml)")
+    parser.add_argument("--budgets",
+                        help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
+                             "(overrides the budgets list in the config file)")
+    args = parser.parse_args()
+
+    cfg = NPEConfig.from_yaml(args.config)
+    if args.budgets is not None:
+        cfg.budgets = [int(b) for b in args.budgets.split(",")]
+
+    holdout_ds = load_from_disk(args.holdout_path)
+
+    for budget in cfg.budgets:
+        _train_budget_core(
+            budget,
+            Path(args.checkpoints_path),
+            Path(args.npe_results_path),
+            Path(args.summaries_cache_path),
+            type("_Noop", (), {"reload": lambda s: None, "commit": lambda s: None})(),
+            lambda split, ds=holdout_ds: ds[split],
+            cfg,
+        )
