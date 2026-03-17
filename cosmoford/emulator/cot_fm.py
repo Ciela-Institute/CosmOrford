@@ -71,9 +71,21 @@ parser.add_argument(
 parser.add_argument("--base_lr", type=float, default=5e-4, help="Base learning rate (override)")
 parser.add_argument("--gamma", type=float, default=0.9, help="Exponential LR decay factor (override)")
 parser.add_argument("--ot_reg", type=float, default=0.05, help="Sinkhorn regularization for GPU OT")
+parser.add_argument("--ot_method", type=str, default="sinkhorn", choices=["sinkhorn", "emd"], help="OT solver: sinkhorn (fast, regularized) or emd (exact LP)")
 parser.add_argument("--dataset_dir_nbody", type=str, default=None, help="Path to local neurips-wl-challenge-flat DatasetDict (load_from_disk); falls back to HF Hub if not set")
 parser.add_argument("--dataset_dir_logn_train", type=str, default=None, help="Path to lognormal training dataset")
 parser.add_argument("--dataset_dir_logn_val", type=str, default=None, help="Path to lognormal validation dataset")
+parser.add_argument("--exp_config", type=str, default=None, help="Path to experiment YAML; values used as defaults, overridden by any explicit CLI args")
+
+# Pre-parse exp_config and inject as parser defaults so CLI args still override
+_pre = argparse.ArgumentParser(add_help=False)
+_pre.add_argument("--exp_config", type=str, default=None)
+_pre_args, _ = _pre.parse_known_args()
+if _pre_args.exp_config is not None:
+    with open(_pre_args.exp_config) as _f:
+        _exp_cfg = yaml.safe_load(_f)
+    _exp_cfg.pop("exp_name", None)  # not an argparse arg
+    parser.set_defaults(**_exp_cfg)
 
 args = parser.parse_args()
 
@@ -152,6 +164,7 @@ def sample_ot_plan(
     eps: float,
     device: torch.device,
     reg: float,
+    ot_method: str = "sinkhorn",
 ):
     x0_t = torch.from_numpy(x0.reshape(x0.shape[0], -1)).float().to(device)
     x1_t = torch.from_numpy(x1.reshape(x1.shape[0], -1)).float().to(device)
@@ -161,7 +174,13 @@ def sample_ot_plan(
     a = torch.full((n,), 1.0 / n, device=device, dtype=torch.float32)
     b = torch.full((m,), 1.0 / m, device=device, dtype=torch.float32)
     M = compute_cost_matrix(x0_t, x1_t, yx0_t, yx1_t, eps)
-    tp = ot.sinkhorn(a, b, M, reg=reg)
+    if ot_method == "emd":
+        # ot.emd requires CPU tensors (LP solver runs on CPU)
+        tp = ot.emd(a.cpu(), b.cpu(), M.cpu()).to(device)
+    else:
+        # sinkhorn_log: log-domain arithmetic, numerically stable for small reg
+        # numItermax=50000 ensures convergence at ot_reg=1e-3
+        tp = ot.sinkhorn(a, b, M, reg=reg, method="sinkhorn_log", numItermax=50000)
     return get_paired_data(tp.cpu().numpy(), n, rng)
 
 
@@ -170,7 +189,7 @@ print("--Define get sample--")
 def sample_time(n_samples: int, device: torch.device) -> torch.Tensor:
     return torch.rand(n_samples, 1, device=device)
 
-def get_ot_batch(batch, rng: np.random.Generator, eps: float, device: torch.device, ot_reg: float):
+def get_ot_batch(batch, rng: np.random.Generator, eps: float, device: torch.device, ot_reg: float, ot_method: str = "sinkhorn"):
     # Split parent RNG for independent, reproducible streams
     rng_pre, rng_x0, rng_x1, rng_plan = split_rng(rng, 4)
 
@@ -188,7 +207,7 @@ def get_ot_batch(batch, rng: np.random.Generator, eps: float, device: torch.devi
     x0, vmask0, hmask0 = augmentation_data_numpy(x0, rng_x0)
     x1, vmask1, hmask1 = augmentation_data_numpy(x1, rng_x1)
 
-    inds_x0, inds_x1 = sample_ot_plan(x0, x1, theta_x0, theta_x1, rng_plan, eps, device, ot_reg)
+    inds_x0, inds_x1 = sample_ot_plan(x0, x1, theta_x0, theta_x1, rng_plan, eps, device, ot_reg, ot_method=ot_method)
     x0_paired = x0[inds_x0]
     x1_paired = x1[inds_x1]
     theta_x0_paired = theta_x0[inds_x0]
@@ -300,6 +319,7 @@ wandb_kwargs = dict(project=args.wandb_project, name=args.wandb_run_name or auto
     "base_lr": args.base_lr,
     "gamma": args.gamma,
     "ot_reg": args.ot_reg,
+    "ot_method": args.ot_method,
     "model_config": config,
     "config_source": config_source,
 })
@@ -369,7 +389,7 @@ for epoch in tqdm(range(num_epochs)):
     rng_epoch = np.random.default_rng(args.seed + epoch)
 
     for batch_logn, batch_nbody in zip(ds_train_logn, ds_train_nbody):
-        batch = get_ot_batch([batch_logn, batch_nbody], rng_epoch, eps, device, args.ot_reg)
+        batch = get_ot_batch([batch_logn, batch_nbody], rng_epoch, eps, device, args.ot_reg, ot_method=args.ot_method)
 
         for mb in iter_microbatches(batch, micro_bs):
             loss = train_step(
@@ -396,7 +416,7 @@ for epoch in tqdm(range(num_epochs)):
                 ds_test_nbody = get_iterable_dataset(test_dataset_nbody, micro_bs, 0)
                 batch_lognormal = next(ds_test_lognormal)
                 batch_nbody = next(ds_test_nbody)
-                batch = get_ot_batch([batch_lognormal, batch_nbody], rng_eval, eps, device, args.ot_reg)
+                batch = get_ot_batch([batch_lognormal, batch_nbody], rng_eval, eps, device, args.ot_reg, ot_method=args.ot_method)
 
                 with torch.no_grad():
                     lt = flow_matching_loss(unet, batch['x0'], batch['x1'], batch['theta_x0'], batch['t'], sigma)
@@ -435,7 +455,7 @@ for epoch in tqdm(range(num_epochs)):
                 ds_test_nbody = get_iterable_dataset(test_dataset_nbody, micro_bs, 0)
                 batch_lognormal = next(ds_test_lognormal)
                 batch_nbody = next(ds_test_nbody)
-                batch_test = get_ot_batch([batch_lognormal, batch_nbody], rng_epoch, eps, device, args.ot_reg)
+                batch_test = get_ot_batch([batch_lognormal, batch_nbody], rng_epoch, eps, device, args.ot_reg, ot_method=args.ot_method)
 
                 x_1_pred = solve_ode_forward(batch_test['x0'], unet, batch_test['theta_x0'], device)
 
@@ -552,12 +572,53 @@ for epoch in tqdm(range(num_epochs)):
 # Final trained model
 try:
     final_ckpt = str(ckpt_dir / "unet_FINAL.pth")
-    # Save final checkpoint to disk before logging
     torch.save(unet.state_dict(), final_ckpt)
     art = wandb.Artifact("unet-final", type="model")
     art.add_file(final_ckpt)
     wandb.log_artifact(art)
 except Exception:
     pass
+
+# Post-training PQMass: evaluate both last and best checkpoints on a fixed test set
+def _pqm_eval_checkpoint(model, label):
+    try:
+        pqm_bs = 500
+        ds_logn = get_iterable_dataset(test_dataset_lognormal, pqm_bs, 42)
+        ds_nbody = get_iterable_dataset(test_dataset_nbody, pqm_bs, 42)
+        batch_logn = next(ds_logn)
+        batch_nbody = next(ds_nbody)
+        batch = get_ot_batch([batch_logn, batch_nbody], np.random.default_rng(42), eps, device, args.ot_reg, ot_method=args.ot_method)
+
+        chunks = []
+        for start in range(0, batch['x0'].shape[0], micro_bs):
+            x0_c = batch['x0'][start:start + micro_bs]
+            theta_c = batch['theta_x0'][start:start + micro_bs]
+            with torch.no_grad():
+                pred_c = solve_ode_forward(x0_c, model, theta_c, device)
+            chunks.append(pred_c[-1])
+        maps_gen = np.concatenate(chunks, axis=0)
+        maps_ref = batch['x1'].detach().cpu().squeeze(1).numpy()
+
+        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen)
+        fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
+        path = fig_dir / f"pqm_final_{label}.png"
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        wandb.log({
+            f"pqm/chi2_{label}_mean": float(np.mean(chi2_vals)),
+            f"pqm/plot_{label}": wandb.Image(str(path), caption=f"PQMass N-body vs UNet ({label})"),
+        })
+        print(f"PQMass [{label}]: mean χ² = {np.mean(chi2_vals):.1f}")
+    except Exception as e:
+        print(f"PQMass [{label}] failed: {e}")
+
+_pqm_eval_checkpoint(unet, "last")
+
+best_ckpt_path = ckpt_dir / "unet_best.pth"
+if best_ckpt_path.exists():
+    unet_best = build_unet2d_condition_with_y(config).to(device)
+    unet_best.load_state_dict(torch.load(str(best_ckpt_path), map_location=device))
+    unet_best.eval()
+    _pqm_eval_checkpoint(unet_best, "best")
 
 wandb.finish()
