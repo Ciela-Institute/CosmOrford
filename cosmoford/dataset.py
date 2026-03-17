@@ -122,14 +122,21 @@ class ChallengeDataModule(L.LightningDataModule):
         "GRF_HF": "CosmoStat/GRF_HF",
     }
 
+    # Mapping from canonical dataset name to (local_dir_name, gcs_name)
+    _DATASET_NAMES = {
+        "gowerstreet_patches": ("gowerstreet-train", "gowerstreet_patches"),
+    }
+
     def _load_auxiliary_dataset(self, name):
         """Load an auxiliary dataset from local disk, or from HuggingFace Hub / GCS when use_hub is True."""
         if self.use_hub:
             if name in self._HUB_PATHS:
                 return load_dataset(self._HUB_PATHS[name], split="train")
-            return Dataset.load_from_disk(f"gs://neurips-wl/datasets/{name}")
+            gcs_name = self._DATASET_NAMES.get(name, (None, name))[1]
+            return Dataset.load_from_disk(f"gs://neurips-wl/datasets/{gcs_name}")
         else:
-            return load_from_disk(os.path.join(self.data_dir, name))
+            local_name = self._DATASET_NAMES.get(name, (name, None))[0]
+            return load_from_disk(os.path.join(self.data_dir, local_name))
 
     def setup(self, stage=None):
         # Load the main dataset
