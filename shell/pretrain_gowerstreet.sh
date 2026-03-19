@@ -11,12 +11,22 @@
 
 
 # Running the python script
-cd /home/noedia/links/projects/rrg-lplevass/noedia/wl_neurips/ciela_branch/CosmOrford
-source .venv/bin/activate 
+source ../.venv/bin/activate 
 wandb offline
 
+# Getting user-level config from global_config.yaml
+WDIR=$(yq -r '.wdir' global_config.yaml)
+SAVE_DIR=$(yq -r '.save_dir' global_config.yaml)
 
+# Changes Hugging face cache directory  
 export HF_HOME="~/links/scratch/cache"
-# We use dot notation to reach deep into the YAML structure
+
+# Going to the repository directory
+cd $WDIR
+
+# Running experiment.
 uv run trainer fit \
-    -c configs/experiments/pretrain_gowerstreet_nopatch_logp.yaml
+    -c configs/experiments/pretrain_gowerstreet_nopatch_logp.yaml\
+    --trainer.logger.init_args.name="effnet_v2_s_nbody_budget_final_$CURRENT_BUDGET" \
+    --trainer.logger.init_args.save_dir="$SAVE_DIR/lognormal/finetune/budget-$CURRENT_BUDGET"
+

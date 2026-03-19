@@ -12,9 +12,19 @@
 
 
 # Running the python script
-cd /home/noedia/links/projects/rrg-lplevass/noedia/wl_neurips/ciela_branch/CosmOrford
-source .venv/bin/activate 
+source ../.venv/bin/activate 
 wandb offline
+
+# Getting user-level config from global_config.yaml
+WDIR=$(yq -r '.wdir' global_config.yaml)
+SAVE_DIR=$(yq -r '.save_dir' global_config.yaml)
+
+# Changes Hugging face cache directory  
+export HF_HOME="~/links/scratch/cache"
+
+# Going to the repository directory
+cd $WDIR
+
 # Define your budget samples
 BUDGETS=(100 200 500 1000 2000 5000 10000 20200)
 
@@ -27,6 +37,6 @@ uv run trainer fit \
     -c configs/experiments/efficientnet_v2_s_logp.yaml \
     --data.init_args.max_train_samples=$CURRENT_BUDGET \
     --trainer.logger.init_args.name="effnet_v2_s_nbody_budget_final_$CURRENT_BUDGET" \
-    --trainer.logger.init_args.save_dir="/home/noedia/links/scratch/wl_chall/models/budget_scan_nbody_final/budget-$CURRENT_BUDGET"
+    --trainer.logger.init_args.save_dir="$SAVE_DIR/budget_scan_nbody_final/budget-$CURRENT_BUDGET"
 
 
