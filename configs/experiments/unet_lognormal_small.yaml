@@ -15,7 +15,7 @@ sigma: 0.0001     # Phase 3 best
 
 base_lr: 5.0e-4   # Phase 4 best
 gamma: 0.85       # Phase 4 best
-num_epochs: 100
+max_steps: 50000
 
 batch_size: 500
 micro_batch_size: 40
