@@ -212,35 +212,23 @@ to narrow candidates before submitting 24h training jobs.
 
 | W&B run name | `base_lr` | `gamma` | `num_epochs` | Config | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
 |--------------|-----------|---------|--------------|--------|-----------|-----------------|-----------------|------------|-------|
-| `unet/phase4/lr_gamma09_100ep` | 1e-3 | 0.9 | 100 | — | — | — | — | — | reuse p3_sigma_1e-4 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fl9vjx9t) |
-| `unet/phase4/lr_gamma095_150ep` | 1e-3 | 0.95 | 150 | [config](../configs/experiments/unet_exp/phase4_lr_gamma095_150ep.yaml) | 8485615 | — | — | — | slower decay |
-| `unet/phase4/lr_gamma099_150ep` | 5e-4 | 0.99 | 150 | [config](../configs/experiments/unet_exp/phase4_lr_gamma099_150ep.yaml) | 8485616 | — | — | — | nearly flat |
+| `unet/phase4/lr_gamma09_100ep` | 1e-3 | 0.9 | 100 | — | — | **113.03** | 108.16 | 24.61 | reuse p3_sigma_1e-4 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fl9vjx9t) |
+| `unet/phase4/lr_gamma095_150ep` | 1e-3 | 0.95 | 150 | [config](../configs/experiments/unet_exp/phase4_lr_gamma095_150ep.yaml) | 8485615 | **112.42** | 109.74 | 25.85 | slower decay · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/rb62vidu) |
+| `unet/phase4/lr_gamma099_150ep` | 5e-4 | 0.99 | 150 | [config](../configs/experiments/unet_exp/phase4_lr_gamma099_150ep.yaml) | 8485616 | **111.80** | 110.47 | 25.61 | nearly flat · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/sucb9fdn) |
+| `unet/phase4/lr_gamma085_100ep` | 5e-4 | 0.85 | 100 | [config](../configs/experiments/unet_exp/phase4_lr_gamma085_100ep.yaml) | 8510327 | failed | 104.35 | 25.94 | aggressive decay · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/6m03w9zm) |
+| `unet/phase4/lr_gamma080_100ep` | 5e-4 | 0.80 | 100 | [config](../configs/experiments/unet_exp/phase4_lr_gamma080_100ep.yaml) | 8548546 | failed | 105.50 | 26.70 | most aggressive decay · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/zxvup23d) |
 
-**Best LR schedule:** _TBD_
+**Power spectrum (best checkpoint):**
 
----
+| gamma=0.9 / 100ep | gamma=0.95 / 150ep | gamma=0.99 / 150ep | gamma=0.85 / 100ep | gamma=0.80 / 100ep |
+|---|---|---|---|---|
+| ![](figs/ps_p3_sigma_1e-4_best_summary.png) | ![](figs/ps_p4_gamma095_best_summary.png) | ![](figs/ps_p4_gamma099_best_summary.png) | ![](figs/ps_p4_gamma085_best_summary.png) | ![](figs/ps_p4_gamma080_best_summary.png) |
 
-## Final run — best of everything
+**Pixel PDF (best checkpoint):**
 
-Config: `configs/experiments/final.yaml` (fill in all TODOs before submitting)
+| gamma=0.9 / 100ep | gamma=0.95 / 150ep | gamma=0.99 / 150ep | gamma=0.85 / 100ep | gamma=0.80 / 100ep |
+|---|---|---|---|---|
+| ![](figs/pdf_p3_sigma_1e-4_best.png) | ![](figs/pdf_p4_gamma095_best.png) | ![](figs/pdf_p4_gamma099_best.png) | ![](figs/pdf_p4_gamma085_best.png) | ![](figs/pdf_p4_gamma080_best.png) |
 
-| W&B run name | Config | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
-|--------------|--------|-----------|-----------------|-----------------|------------|-------|
-| `unet/final` | final.yaml | — | — | — | — | |
+**Best LR schedule: `unet/phase4/lr_gamma085_100ep`** (`base_lr=5e-4`, `gamma=0.85`, 100 epochs) — best `chi2_last=104.35`. Note: `chi2_best` failed due to val_loss being a poor proxy; final run will use `best_ckpt_metric: pqm_chi2`.
 
----
-
-## Summary of best hyperparameters
-
-_To be filled after all phases complete._
-
-| Parameter | Baseline | Best value | Phase found |
-|-----------|----------|------------|-------------|
-| `eps` | 0.1 | | Phase 0 |
-| OT method | sinkhorn | | Phase 1 |
-| `ot_reg` | 0.1 | | Phase 1 |
-| Architecture | medium [32,64,128] | | Phase 2 |
-| `sigma` | 0.001 | | Phase 3 |
-| `base_lr` | 1e-3 | | Phase 4 |
-| `gamma` | 0.9 | | Phase 4 |
-| `num_epochs` | 100 | | Phase 4 |
