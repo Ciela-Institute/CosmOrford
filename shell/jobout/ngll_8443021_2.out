@@ -1,0 +1,166 @@
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+W&B offline. Running your script from this directory will only write metadata locally. Use `wandb disabled` to completely turn off W&B.
+Running job for budget: 500
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/fabric/utilities/seed.py:44: No seed found, seed set to 0
+[rank: 0] Seed set to 0
+Using 16bit Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+wandb: Tracking run with wandb version 0.25.1
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /home/noedia/links/scratch/wl_chall/models/budget_scan_nbody/wandb/offline-run-20260316_113456-zqsmuo94
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py:242: Precision 16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+Training set limited to 500 samples (from 40400)
+┏━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name         ┃ Type       ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model        │ Sequential │ 20.2 M │ train │     0 │
+│ 1 │ reshape_head │ Sequential │      0 │ train │     0 │
+│ 2 │ compressor   │ Linear     │ 10.2 K │ train │     0 │
+│ 3 │ head         │ Sequential │    420 │ train │     0 │
+└───┴──────────────┴────────────┴────────┴───────┴───────┘
+Trainable params: 20.2 M                                                        
+Non-trainable params: 0                                                         
+Total params: 20.2 M                                                            
+Total estimated model params size (MB): 80                                      
+Modules in train mode: 719                                                      
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+SLURM auto-requeueing enabled. Setting signal handlers.
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/torch/utils/data/dataloader.py:424: UserWarning: This DataLoader will create 8 worker processes in total. Our suggested max number of worker in current system is 1, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
+  self.check_worker_number_rationality()
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/torch/utils/data/dataloader.py:432: UserWarning: This DataLoader will create 8 worker processes in total. Our suggested max number of worker in current system is 1, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
+  self.check_worker_number_rationality()
+Epoch 1857/-2 ━━               1/7   0:01:06 •        0.00it/s v_num: uo94      
+                                     -:--:--                   val_log_prob:    
+                                                               6.744 val_score: 
+                                                               -18.413 val_mse: 
+                                                               0.003            
+Validation    ━━━━━━━          39/88 0:00:45 •        0.95it/s                  
+                                     0:00:52                                    
+Traceback (most recent call last):
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/bin/trainer", line 10, in <module>
+    sys.exit(trainer_cli())
+             ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/trainer.py", line 34, in trainer_cli
+    return LightningCLI(
+           ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 414, in __init__
+    self._run_subcommand(self.subcommand)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 752, in _run_subcommand
+    fn(**fn_kwargs)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 575, in fit
+    call._call_and_handle_interrupt(
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 49, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 613, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 1028, in _run
+    results = self._run_stage()
+              ^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 1072, in _run_stage
+    self.fit_loop.run()
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/loops/fit_loop.py", line 217, in run
+    self.advance()
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/loops/fit_loop.py", line 465, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/loops/training_epoch_loop.py", line 154, in run
+    self.on_advance_end(data_fetcher)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/loops/training_epoch_loop.py", line 399, in on_advance_end
+    self.val_loop.run()
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/loops/utilities.py", line 179, in _decorator
+    return loop_run(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/loops/evaluation_loop.py", line 146, in run
+    self._evaluation_step(batch, batch_idx, dataloader_idx, dataloader_iter)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/loops/evaluation_loop.py", line 441, in _evaluation_step
+    output = call._call_strategy_hook(trainer, hook_name, *step_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 329, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/strategies/strategy.py", line 412, in validation_step
+    return self.lightning_module.validation_step(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/models_nopatch.py", line 368, in validation_step
+    loss_val = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/torch/distributions/normal.py", line 67, in __init__
+    super().__init__(batch_shape, validate_args=validate_args)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/torch/distributions/distribution.py", line 78, in __init__
+    raise ValueError(
+ValueError: Expected parameter loc (Tensor of shape (64, 2)) of distribution Normal(loc: torch.Size([64, 2]), scale: torch.Size([64, 2])) to satisfy the constraint Real(), but found invalid values:
+tensor([[-1.3789,  0.2357],
+        [-0.2252,  0.4258],
+        [-1.5244,  1.1035],
+        [ 1.8203, -1.6328],
+        [ 0.0097,  0.7412],
+        [ 0.4551,  0.9565],
+        [ 1.0703, -0.4167],
+        [ 0.1606,  1.1279],
+        [-0.2888,  0.4294],
+        [ 0.7231, -0.3420],
+        [-1.7383,  0.0297],
+        [ 0.4163, -0.1429],
+        [-1.4883, -1.3271],
+        [-0.0090, -0.7817],
+        [-1.0078,  0.2000],
+        [-0.2681,  1.3516],
+        [ 0.7085, -0.8350],
+        [ 1.9727, -0.7017],
+        [ 0.3042, -0.2034],
+        [ 0.6763, -0.2571],
+        [ 0.2346, -0.1886],
+        [ 0.8882, -0.9883],
+        [ 1.6270, -0.1179],
+        [ 1.4531,  1.2246],
+        [ 0.9019, -0.5947],
+        [ 0.4019, -1.7549],
+        [-1.6016, -0.8511],
+        [ 0.1210, -0.2576],
+        [ 1.4668, -2.0488],
+        [ 1.7461,  0.2847],
+        [    nan,     nan],
+        [ 2.2285, -0.0826],
+        [ 1.4746,  0.7119],
+        [ 1.5791,  0.9116],
+        [-0.9512,  2.0742],
+        [ 1.5000,  0.8066],
+        [ 1.5391,  1.2188],
+        [ 2.8848, -1.0566],
+        [ 2.9062,  0.3691],
+        [ 1.3799,  0.6665],
+        [ 1.8604,  1.0479],
+        [-0.6392,  1.7725],
+        [ 1.8809,  0.5254],
+        [ 1.2871,  0.9307],
+        [ 2.3066, -1.4834],
+        [ 1.8789,  0.9292],
+        [ 1.5547,  0.9385],
+        [ 1.7910,  0.9985],
+        [ 2.2344,  0.7686],
+        [ 0.6919,  1.1367],
+        [ 2.1035,  0.8042],
+        [-1.0918,  1.6084],
+        [ 2.9473,  0.3396],
+        [ 1.3135, -1.3223],
+        [ 2.2520,  0.6265],
+        [ 1.0762,  0.2352],
+        [ 2.4727,  0.2712],
+        [ 2.1484, -0.4431],
+        [ 1.6260,  1.1699],
+        [ 0.5298,  1.9102],
+        [ 0.7104,  1.7559],
+        [ 2.3613, -0.0942],
+        [ 2.1484, -1.4043],
+        [-0.7505,  2.1699]], device='cuda:0', dtype=torch.float16)
+[1;34mwandb[0m: 
+[1;34mwandb[0m: You can sync this run to the cloud by running:
+[1;34mwandb[0m: [1mwandb sync /home/noedia/links/scratch/wl_chall/models/budget_scan_nbody/wandb/offline-run-20260316_113456-zqsmuo94[0m
+[1;34mwandb[0m: Find logs at: [1;35m../../../../../../scratch/wl_chall/models/budget_scan_nbody/wandb/offline-run-20260316_113456-zqsmuo94/logs[0m

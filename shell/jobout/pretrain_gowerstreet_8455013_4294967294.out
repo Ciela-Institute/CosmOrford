@@ -1,0 +1,66 @@
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+W&B offline. Running your script from this directory will only write metadata locally. Use `wandb disabled` to completely turn off W&B.
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/fabric/utilities/seed.py:44: No seed found, seed set to 0
+[rank: 0] Seed set to 0
+Using 16bit Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+wandb: Tracking run with wandb version 0.25.1
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /home/noedia/links/scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_212022-c8pd53yd
+Loading Gower Street pretraining dataset...
+Casting the dataset:   0%|          | 0/40400 [00:00<?, ? examples/s]Casting the dataset:   2%|▏         | 1000/40400 [00:03<02:25, 271.02 examples/s]Casting the dataset:   5%|▍         | 2000/40400 [00:05<01:42, 373.97 examples/s]Casting the dataset:   7%|▋         | 3000/40400 [00:09<01:54, 326.00 examples/s]Casting the dataset:  10%|▉         | 4000/40400 [00:12<01:57, 309.04 examples/s]Casting the dataset:  12%|█▏        | 5000/40400 [00:16<01:56, 303.53 examples/s]Casting the dataset:  15%|█▍        | 6000/40400 [00:17<01:37, 354.39 examples/s]Casting the dataset:  17%|█▋        | 7000/40400 [00:21<01:41, 328.92 examples/s]Casting the dataset:  20%|█▉        | 8000/40400 [00:23<01:26, 376.07 examples/s]Casting the dataset:  22%|██▏       | 9000/40400 [00:25<01:17, 403.12 examples/s]Casting the dataset:  25%|██▍       | 10000/40400 [00:29<01:26, 353.32 examples/s]Casting the dataset:  27%|██▋       | 11000/40400 [00:31<01:15, 387.84 examples/s]Casting the dataset:  30%|██▉       | 12000/40400 [00:34<01:21, 349.37 examples/s]Casting the dataset:  32%|███▏      | 13000/40400 [00:38<01:23, 326.70 examples/s]Casting the dataset:  35%|███▍      | 14000/40400 [00:41<01:25, 308.31 examples/s]Casting the dataset:  37%|███▋      | 15000/40400 [00:45<01:25, 297.39 examples/s]Casting the dataset:  40%|███▉      | 16000/40400 [00:48<01:22, 295.80 examples/s]Casting the dataset:  42%|████▏     | 17000/40400 [00:52<01:19, 293.59 examples/s]Casting the dataset:  45%|████▍     | 18000/40400 [00:56<01:18, 284.25 examples/s]Casting the dataset:  47%|████▋     | 19000/40400 [00:59<01:17, 276.28 examples/s]Casting the dataset:  50%|████▉     | 20000/40400 [01:03<01:14, 273.20 examples/s]Casting the dataset:  52%|█████▏    | 21000/40400 [01:08<01:20, 241.72 examples/s]Casting the dataset:  54%|█████▍    | 22000/40400 [01:13<01:16, 240.42 examples/s]Casting the dataset:  57%|█████▋    | 23000/40400 [01:17<01:14, 234.60 examples/s]Casting the dataset:  59%|█████▉    | 24000/40400 [01:21<01:10, 233.22 examples/s]Casting the dataset:  62%|██████▏   | 25000/40400 [01:26<01:06, 230.45 examples/s]Casting the dataset:  64%|██████▍   | 26000/40400 [01:31<01:05, 220.12 examples/s]Casting the dataset:  67%|██████▋   | 27000/40400 [01:36<01:03, 210.11 examples/s]Casting the dataset:  69%|██████▉   | 28000/40400 [01:41<01:00, 204.44 examples/s]Casting the dataset:  72%|███████▏  | 29000/40400 [01:48<01:02, 181.91 examples/s]Casting the dataset:  74%|███████▍  | 30000/40400 [01:55<00:59, 174.99 examples/s]Casting the dataset:  77%|███████▋  | 31000/40400 [02:02<00:59, 157.42 examples/s]Casting the dataset:  79%|███████▉  | 32000/40400 [02:09<00:55, 151.93 examples/s]Casting the dataset:  82%|████████▏ | 33000/40400 [02:18<00:52, 140.86 examples/s]Casting the dataset:  82%|████████▏ | 33000/40400 [02:36<00:52, 140.86 examples/s]Casting the dataset:  82%|████████▏ | 33000/40400 [02:38<00:35, 207.84 examples/s]
+Traceback (most recent call last):
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/bin/trainer", line 10, in <module>
+    sys.exit(trainer_cli())
+             ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/trainer.py", line 34, in trainer_cli
+    return LightningCLI(
+           ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 414, in __init__
+    self._run_subcommand(self.subcommand)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 752, in _run_subcommand
+    fn(**fn_kwargs)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 575, in fit
+    call._call_and_handle_interrupt(
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 49, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 613, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 988, in _run
+    call._call_setup_hook(self)  # allow user to set up LightningModule in accelerator environment
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 108, in _call_setup_hook
+    _call_lightning_datamodule_hook(trainer, "setup", stage=fn)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 199, in _call_lightning_datamodule_hook
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/dataset.py", line 135, in setup
+    train_dataset = train_dataset.cast(dset_gowerstreet.features)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 2417, in cast
+    dataset = dataset.map(
+              ^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 562, in wrapper
+    out: Union["Dataset", "DatasetDict"] = func(self, *args, **kwargs)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3620, in map
+    for rank, done, content in Dataset._map_single(**unprocessed_kwargs):
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3992, in _map_single
+    writer.write_table(batch)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/arrow_writer.py", line 765, in write_table
+    self.pa_writer.write_table(pa_table, writer_batch_size)
+  File "pyarrow/ipc.pxi", line 616, in pyarrow.lib._CRecordBatchWriter.write_table
+  File "pyarrow/error.pxi", line 89, in pyarrow.lib.check_status
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/fsspec/implementations/local.py", line 473, in write
+    return self.f.write(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 122] Disk quota exceeded
+[1;34mwandb[0m: 
+[1;34mwandb[0m: You can sync this run to the cloud by running:
+[1;34mwandb[0m: [1mwandb sync /home/noedia/links/scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_212022-c8pd53yd[0m
+[1;34mwandb[0m: Find logs at: [1;35m../../../../../../scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_212022-c8pd53yd/logs[0m

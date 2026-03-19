@@ -104,7 +104,8 @@ class ChallengeDataModule(L.LightningDataModule):
 
     def setup(self, stage=None):
         # Load the main dataset
-        dset = load_dataset("cosmostat/neurips-wl-challenge-flat")
+        shared_dir = "~/links/projects/rrg-lplevass/shared/wl_chall_data/"
+        dset = load_dataset(shared_dir + "neurips-wl-challenge-flat")
         dset = dset.with_format("torch")
 
         # Determine which dataset to use for training
@@ -125,12 +126,13 @@ class ChallengeDataModule(L.LightningDataModule):
         elif self.dataset_mode == "gowerstreet-train":
             # Load gowerstreet pretraining dataset
             print("Loading Gower Street pretraining dataset...")
-            dset_gowerstreet = Dataset.load_from_disk("gs://neurips-wl/datasets/gowerstreet_patches")
+            dset_gowerstreet = Dataset.load_from_disk(shared_dir + "gowerstreet-train")
             dset_gowerstreet = dset_gowerstreet.shuffle(seed=42)
             dset_gowerstreet = dset_gowerstreet.with_format("torch")
 
             # Load regular training set
             train_dataset = dset['train']
+            train_dataset = train_dataset.cast(dset_gowerstreet.features)
 
             # Mix gower street and regular training set
             self.train_dataset = concatenate_datasets([dset_gowerstreet, train_dataset]).shuffle(seed=42)
@@ -138,14 +140,15 @@ class ChallengeDataModule(L.LightningDataModule):
 
         elif self.dataset_mode == "lognormal":
             # Load lognormal pretraining dataset
-            dset_lognormal = Dataset.load_from_disk("gs://neurips-wl/datasets/lognormal")
+            dset_lognormal = Dataset.load_from_disk(shared_dir + "lognormal")
             dset_lognormal = dset_lognormal.shuffle(seed=42)
             dset_lognormal = dset_lognormal.with_format("torch")
             self.train_dataset = dset_lognormal
             self.val_dataset = dset['validation']
+            
         elif self.dataset_mode == "ot_emulated":
             # Load lognormal pretraining dataset
-            dset_ot = Dataset.load_from_disk("gs://neurips-wl/datasets/ot_emulated")
+            dset_ot = Dataset.load_from_disk(shared_dir + "ot_emulated")
             dset_ot = dset_ot.rename_column('maps', 'kappa')
             dset_ot = dset_ot.shuffle(seed=42)
             dset_ot = dset_ot.with_format("torch")

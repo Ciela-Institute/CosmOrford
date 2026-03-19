@@ -30,3 +30,6 @@ lightning_logs/
 
 # Generated outputs
 *.pdf
+
+*.lock
+jobout/*

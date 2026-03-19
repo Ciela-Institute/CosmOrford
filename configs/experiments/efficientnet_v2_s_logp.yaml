@@ -13,15 +13,16 @@ model:
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
-    batch_size: 128 
-    num_workers: 12
+    batch_size: 64
+    num_workers: 8
 
 trainer:
-  max_steps: 16000
+  max_steps: 13000
   accelerator: gpu
   precision: "16-mixed"
   log_every_n_steps: 1
   val_check_interval: 500
+  check_val_every_n_epoch: null
   callbacks:
     - class_path: LearningRateMonitor
       init_args:
@@ -39,4 +40,5 @@ trainer:
       name: "efficientnet_v2_s_logp"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
+      save_dir: "/home/noedia/links/scratch/wl_chall/models/budget_scan_nbody"
       log_model: true

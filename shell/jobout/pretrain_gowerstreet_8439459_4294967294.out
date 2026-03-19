@@ -1,0 +1,76 @@
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+W&B offline. Running your script from this directory will only write metadata locally. Use `wandb disabled` to completely turn off W&B.
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/fabric/utilities/seed.py:44: No seed found, seed set to 0
+[rank: 0] Seed set to 0
+Using 16bit Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+wandb: Tracking run with wandb version 0.25.1
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /home/noedia/links/scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_102428-jkf23ije
+Loading Gower Street pretraining dataset...
+Traceback (most recent call last):
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/fsspec/registry.py", line 264, in get_filesystem_class
+    register_implementation(protocol, _import_class(bit["class"]))
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/fsspec/registry.py", line 299, in _import_class
+    mod = importlib.import_module(mod)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1140, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'gcsfs'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/bin/trainer", line 10, in <module>
+    sys.exit(trainer_cli())
+             ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/trainer.py", line 34, in trainer_cli
+    return LightningCLI(
+           ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 414, in __init__
+    self._run_subcommand(self.subcommand)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 752, in _run_subcommand
+    fn(**fn_kwargs)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 575, in fit
+    call._call_and_handle_interrupt(
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 49, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 613, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 988, in _run
+    call._call_setup_hook(self)  # allow user to set up LightningModule in accelerator environment
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 108, in _call_setup_hook
+    _call_lightning_datamodule_hook(trainer, "setup", stage=fn)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 199, in _call_lightning_datamodule_hook
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/dataset.py", line 120, in setup
+    dset_gowerstreet = Dataset.load_from_disk("gs://neurips-wl/datasets/gowerstreet_patches")
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 2008, in load_from_disk
+    fs, dataset_path = url_to_fs(dataset_path, **(storage_options or {}))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/fsspec/core.py", line 420, in url_to_fs
+    chain = _un_chain(url, kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/fsspec/core.py", line 358, in _un_chain
+    cls = get_filesystem_class(protocol)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/fsspec/registry.py", line 266, in get_filesystem_class
+    raise ImportError(bit.get("err")) from e
+ImportError: Please install gcsfs to access Google Storage
+[1;34mwandb[0m: 
+[1;34mwandb[0m: You can sync this run to the cloud by running:
+[1;34mwandb[0m: [1mwandb sync /home/noedia/links/scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_102428-jkf23ije[0m
+[1;34mwandb[0m: Find logs at: [1;35m../../../../../../scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_102428-jkf23ije/logs[0m

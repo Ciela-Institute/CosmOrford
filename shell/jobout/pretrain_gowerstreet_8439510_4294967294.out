@@ -1,0 +1,55 @@
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+W&B offline. Running your script from this directory will only write metadata locally. Use `wandb disabled` to completely turn off W&B.
+/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/fabric/utilities/seed.py:44: No seed found, seed set to 0
+[rank: 0] Seed set to 0
+Using 16bit Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+wandb: Tracking run with wandb version 0.25.1
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /home/noedia/links/scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_102903-dxfpcktz
+Loading Gower Street pretraining dataset...
+Traceback (most recent call last):
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/bin/trainer", line 10, in <module>
+    sys.exit(trainer_cli())
+             ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/trainer.py", line 34, in trainer_cli
+    return LightningCLI(
+           ^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 414, in __init__
+    self._run_subcommand(self.subcommand)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/cli.py", line 752, in _run_subcommand
+    fn(**fn_kwargs)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 575, in fit
+    call._call_and_handle_interrupt(
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 49, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 613, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/trainer.py", line 988, in _run
+    call._call_setup_hook(self)  # allow user to set up LightningModule in accelerator environment
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 108, in _call_setup_hook
+    _call_lightning_datamodule_hook(trainer, "setup", stage=fn)
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/trainer/call.py", line 199, in _call_lightning_datamodule_hook
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/cosmoford/dataset.py", line 137, in setup
+    self.train_dataset = concatenate_datasets([dset_gowerstreet, train_dataset]).shuffle(seed=42)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/combine.py", line 230, in concatenate_datasets
+    return _concatenate_map_style_datasets(dsets, info=info, split=split, axis=axis)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 6803, in _concatenate_map_style_datasets
+    _check_if_features_can_be_aligned([dset.features for dset in dsets])
+  File "/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/datasets/features/features.py", line 2428, in _check_if_features_can_be_aligned
+    raise ValueError(
+ValueError: The features can't be aligned because the key kappa of features {'kappa': Array2D(shape=(1424, 176), dtype='float16'), 'theta': List(Value('float32'), length=5)} has unexpected type - Array2D(shape=(1424, 176), dtype='float16') (expected either List(List(Value('float64'))) or Value("null").
+[1;34mwandb[0m: 
+[1;34mwandb[0m: You can sync this run to the cloud by running:
+[1;34mwandb[0m: [1mwandb sync /home/noedia/links/scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_102903-dxfpcktz[0m
+[1;34mwandb[0m: Find logs at: [1;35m../../../../../../scratch/wl_chall/models/pretrain_gowerstreet/wandb/offline-run-20260316_102903-dxfpcktz/logs[0m

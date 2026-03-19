@@ -1,0 +1,62 @@
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+W&B offline. Running your script from this directory will only write metadata locally. Use `wandb disabled` to completely turn off W&B.
+Running job for budget: 
+usage: trainer [options] fit [-c CONFIG] [--seed_everything SEED_EVERYTHING]
+                             [--trainer CONFIG]
+                             [--trainer.accelerator ACCELERATOR]
+                             [--trainer.strategy STRATEGY]
+                             [--trainer.devices DEVICES]
+                             [--trainer.num_nodes NUM_NODES]
+                             [--trainer.precision PRECISION]
+                             [--trainer.logger LOGGER]
+                             [--trainer.callbacks CALLBACKS]
+                             [--trainer.fast_dev_run FAST_DEV_RUN]
+                             [--trainer.max_epochs MAX_EPOCHS]
+                             [--trainer.min_epochs MIN_EPOCHS]
+                             [--trainer.max_steps MAX_STEPS]
+                             [--trainer.min_steps MIN_STEPS]
+                             [--trainer.max_time MAX_TIME]
+                             [--trainer.limit_train_batches LIMIT_TRAIN_BATCHES]
+                             [--trainer.limit_val_batches LIMIT_VAL_BATCHES]
+                             [--trainer.limit_test_batches LIMIT_TEST_BATCHES]
+                             [--trainer.limit_predict_batches LIMIT_PREDICT_BATCHES]
+                             [--trainer.overfit_batches OVERFIT_BATCHES]
+                             [--trainer.val_check_interval VAL_CHECK_INTERVAL]
+                             [--trainer.check_val_every_n_epoch CHECK_VAL_EVERY_N_EPOCH]
+                             [--trainer.num_sanity_val_steps NUM_SANITY_VAL_STEPS]
+                             [--trainer.log_every_n_steps LOG_EVERY_N_STEPS]
+                             [--trainer.enable_checkpointing {true,false,null}]
+                             [--trainer.enable_progress_bar {true,false,null}]
+                             [--trainer.enable_model_summary {true,false,null}]
+                             [--trainer.accumulate_grad_batches ACCUMULATE_GRAD_BATCHES]
+                             [--trainer.gradient_clip_val GRADIENT_CLIP_VAL]
+                             [--trainer.gradient_clip_algorithm GRADIENT_CLIP_ALGORITHM]
+                             [--trainer.deterministic DETERMINISTIC]
+                             [--trainer.benchmark {true,false,null}]
+                             [--trainer.inference_mode {true,false}]
+                             [--trainer.use_distributed_sampler {true,false}]
+                             [--trainer.profiler PROFILER]
+                             [--trainer.detect_anomaly {true,false}]
+                             [--trainer.barebones {true,false}]
+                             [--trainer.plugins PLUGINS]
+                             [--trainer.sync_batchnorm {true,false}]
+                             [--trainer.reload_dataloaders_every_n_epochs RELOAD_DATALOADERS_EVERY_N_EPOCHS]
+                             [--trainer.default_root_dir DEFAULT_ROOT_DIR]
+                             [--trainer.enable_autolog_hparams {true,false}]
+                             [--trainer.model_registry MODEL_REGISTRY]
+                             --model CONFIG | CLASS_PATH_OR_NAME | .INIT_ARG_NAME VALUE
+                             [--data CONFIG | CLASS_PATH_OR_NAME | .INIT_ARG_NAME VALUE]
+                             [--optimizer CONFIG | CLASS_PATH_OR_NAME | .INIT_ARG_NAME VALUE]
+                             [--lr_scheduler CONFIG | CLASS_PATH_OR_NAME | .INIT_ARG_NAME VALUE]
+                             [--ckpt_path CKPT_PATH]
+tip: For details of accepted options run: trainer fit --help
+error: Parser key "data":
+  Does not validate against any of the Union subtypes
+  Subtypes: [<class 'NoneType'>, <class 'lightning.pytorch.core.datamodule.LightningDataModule'>]
+  Errors:
+    - Expected a <class 'NoneType'>
+    - Problem with given class_path 'cosmoford.dataset.ChallengeDataModule':
+        Parser key "max_train_samples":
+          Expected a <class 'int'>. Got value: 
+  Given value type: <class 'jsonargparse._util.NestedArg'>
+  Given value: NestedArg(key='max_train_samples', val='')

@@ -1,0 +1,3 @@
+wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
+W&B offline. Running your script from this directory will only write metadata locally. Use `wandb disabled` to completely turn off W&B.
+slurmstepd: error: *** JOB 8439456 ON rg21705 CANCELLED AT 2026-03-16T14:24:05 ***
