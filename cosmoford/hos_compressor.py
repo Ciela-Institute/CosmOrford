@@ -46,6 +46,22 @@ from cosmoford.summaries import (
 )
 
 
+def _inverse_reshape_field(kappa_reduced: torch.Tensor, fill_value: float = 0.0) -> torch.Tensor:
+    """Reconstruct full (1424, 176) maps from reduced (1834, 88) representation."""
+    bsz, _, _ = kappa_reduced.shape
+    part1 = kappa_reduced[:, :1424, :]
+    part2 = kappa_reduced[:, 1424:, :]
+    kappa_full = torch.full(
+        (bsz, 1424, 176),
+        fill_value,
+        dtype=kappa_reduced.dtype,
+        device=kappa_reduced.device,
+    )
+    kappa_full[:, :, :88] = part1
+    kappa_full[:, 620:1030, 88:] = part2
+    return kappa_full
+
+
 def build_flow(
     param_dim: int = 2,
     context_dim: int = 8,
@@ -88,6 +104,7 @@ def _compute_input_dim(
     use_scattering: bool,
     scattering_J: int,
     scattering_L: int,
+    scattering_feature_pooling: str,
     use_ps: bool,
 ) -> int:
     """Compute the total raw feature dimensionality from summary settings."""
@@ -97,7 +114,11 @@ def _compute_input_dim(
         # L1-norm histograms:    n_scales * l1_nbins
         dim += hos_n_scales * (hos_n_bins + hos_l1_nbins)
     if use_scattering:
-        dim += scattering_n_coefficients(scattering_J, scattering_L)
+        dim += scattering_n_coefficients(
+            scattering_J,
+            scattering_L,
+            feature_pooling=scattering_feature_pooling,
+        )
     if use_ps:
         dim += 10
     return dim
@@ -130,7 +151,13 @@ class HOSCompressor(L.LightningModule):
         use_scattering: bool = True,
         scattering_J: int = 4,
         scattering_L: int = 8,
+        scattering_normalization: str = "log1p_zscore",
+        scattering_feature_pooling: str = "mean",
+        scattering_mask_pooling: str = "soft",
+        scattering_geometry: str = "reduced",
         use_ps: bool = False,
+        augment_flip: bool = True,
+        augment_shift: bool = True,
         # --- Compressor MLP ---
         summary_dim: int = 8,
         hidden_dim: int = 512,
@@ -144,12 +171,34 @@ class HOSCompressor(L.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
+        if scattering_normalization not in ["log1p_zscore", "zscore", "none"]:
+            raise ValueError(
+                "scattering_normalization must be one of ['log1p_zscore', 'zscore', 'none'], "
+                f"got '{scattering_normalization}'"
+            )
+        if scattering_mask_pooling not in ["soft", "hard"]:
+            raise ValueError(
+                "scattering_mask_pooling must be one of ['soft', 'hard'], "
+                f"got '{scattering_mask_pooling}'"
+            )
+        if scattering_feature_pooling not in ["mean", "mean_std"]:
+            raise ValueError(
+                "scattering_feature_pooling must be one of ['mean', 'mean_std'], "
+                f"got '{scattering_feature_pooling}'"
+            )
+        if scattering_geometry not in ["reduced", "full"]:
+            raise ValueError(
+                "scattering_geometry must be one of ['reduced', 'full'], "
+                f"got '{scattering_geometry}'"
+            )
 
-        self.mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
+        self.mask_reduced = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
+        self.mask_full = SURVEY_MASK
+        self.mask = self.mask_reduced
 
         input_dim = _compute_input_dim(
             use_hos, hos_n_scales, hos_n_bins, hos_l1_nbins,
-            use_scattering, scattering_J, scattering_L, use_ps,
+            use_scattering, scattering_J, scattering_L, scattering_feature_pooling, use_ps,
         )
         if input_dim == 0:
             raise ValueError(
@@ -181,7 +230,7 @@ class HOSCompressor(L.LightningModule):
     def _compute_summaries(self, x: torch.Tensor) -> torch.Tensor:
         """Compute concatenated summary statistics (no gradient tracking)."""
         parts = []
-        mask_t = torch.tensor(self.mask, device=x.device, dtype=x.dtype).unsqueeze(0)
+        mask_t = torch.tensor(self.mask_reduced, device=x.device, dtype=x.dtype).unsqueeze(0)
         with torch.no_grad():
             if self.hparams.use_ps:
                 _, ps = power_spectrum_batch(x)
@@ -203,11 +252,21 @@ class HOSCompressor(L.LightningModule):
                 )
                 parts.append(hos)
             if self.hparams.use_scattering:
+                if self.hparams.scattering_geometry == "full":
+                    scat_x = _inverse_reshape_field(x)
+                    scat_mask = torch.tensor(self.mask_full, device=x.device, dtype=x.dtype)
+                else:
+                    scat_x = x
+                    scat_mask = mask_t.squeeze(0)
                 scat = compute_scattering_batch(
-                    x,
+                    scat_x,
                     J=self.hparams.scattering_J,
                     L=self.hparams.scattering_L,
                     normalize=True,
+                    normalization=self.hparams.scattering_normalization,
+                    mask=scat_mask,
+                    mask_pooling=self.hparams.scattering_mask_pooling,
+                    feature_pooling=self.hparams.scattering_feature_pooling,
                 )
                 parts.append(scat)
         return torch.cat(parts, dim=1)
@@ -236,14 +295,16 @@ class HOSCompressor(L.LightningModule):
 
         # Augmentations BEFORE masking so the survey footprint stays fixed
         batch_size = x.size(0)
-        flip_lr = torch.rand(batch_size, device=x.device) < 0.5
-        x[flip_lr] = torch.flip(x[flip_lr], dims=[1])
-        flip_ud = torch.rand(batch_size, device=x.device) < 0.5
-        x[flip_ud] = torch.flip(x[flip_ud], dims=[2])
-        shift_x = torch.randint(low=0, high=x.size(1), size=(batch_size,), device=x.device)
-        x = torch.stack([torch.roll(x[i], shifts=(shift_x[i].item(),), dims=(0,)) for i in range(batch_size)])
-        shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
-        x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
+        if self.hparams.augment_flip:
+            flip_lr = torch.rand(batch_size, device=x.device) < 0.5
+            x[flip_lr] = torch.flip(x[flip_lr], dims=[1])
+            flip_ud = torch.rand(batch_size, device=x.device) < 0.5
+            x[flip_ud] = torch.flip(x[flip_ud], dims=[2])
+        if self.hparams.augment_shift:
+            shift_x = torch.randint(low=0, high=x.size(1), size=(batch_size,), device=x.device)
+            x = torch.stack([torch.roll(x[i], shifts=(shift_x[i].item(),), dims=(0,)) for i in range(batch_size)])
+            shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
+            x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
 
         # Apply mask after augmentation
         x = x * torch.tensor(self.mask, device=x.device).unsqueeze(0)

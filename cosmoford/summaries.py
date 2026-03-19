@@ -439,15 +439,48 @@ def _get_scattering_obj(J: int, L: int, H: int, W: int, device: torch.device):
     return _scattering_cache[key]
 
 
-def scattering_n_coefficients(J: int, L: int) -> int:
+def scattering_n_coefficients(
+    J: int,
+    L: int,
+    feature_pooling: str = "mean",
+) -> int:
     """Number of scattering coefficients for orders 0, 1, and 2.
 
     K = 1 (order 0) + J*L (order 1) + L^2 * J*(J-1)/2 (order 2)
     """
-    return 1 + L * J + L * L * J * (J - 1) // 2
+    base = 1 + L * J + L * L * J * (J - 1) // 2
+    if feature_pooling == "mean":
+        return base
+    if feature_pooling == "mean_std":
+        return 2 * base
+    raise ValueError(
+        f"Invalid feature_pooling='{feature_pooling}'. Expected one of ['mean', 'mean_std']."
+    )
 
 
-def compute_scattering_batch(x, J=5, L=8, normalize=True):
+def scattering_order_slices(J: int, L: int) -> dict:
+    """Return coefficient index slices for scattering orders 0/1/2."""
+    n0 = 1
+    n1 = J * L
+    n2 = L * L * J * (J - 1) // 2
+    return {
+        "order0": slice(0, n0),
+        "order1": slice(n0, n0 + n1),
+        "order2": slice(n0 + n1, n0 + n1 + n2),
+    }
+
+
+def compute_scattering_batch(
+    x,
+    J=5,
+    L=8,
+    normalize=True,
+    normalization: str = "log1p_zscore",
+    mask: torch.Tensor = None,
+    mask_threshold: float = 0.2,
+    mask_pooling: str = "soft",
+    feature_pooling: str = "mean",
+):
     """
     Compute 2D wavelet scattering transform coefficients for batched maps.
 
@@ -463,12 +496,34 @@ def compute_scattering_batch(x, J=5, L=8, normalize=True):
     L : int
         Number of angular orientations.
     normalize : bool
-        If True, apply log1p then per-batch z-score standardization.
+        Backward-compatible flag. If True, applies the normalization selected by
+        ``normalization``. If False, returns raw averaged scattering coefficients.
+    normalization : str
+        One of:
+          - "log1p_zscore": log1p transform then per-batch z-score (default).
+          - "zscore": per-batch z-score without log1p.
+          - "none": no feature normalization.
+    mask : torch.Tensor, optional
+        Survey mask with shape (ny, nx) or (1, ny, nx). If provided, scattering
+        coefficients are pooled with mask-aware weighting over the downsampled
+        scattering grid instead of uniform spatial averaging.
+    mask_threshold : float
+        Threshold applied to the downsampled mask when ``mask_pooling='hard'``.
+    mask_pooling : str
+        One of:
+          - "soft": weighted spatial averaging using fractional mask coverage.
+          - "hard": binary include/exclude with ``mask_threshold``.
+    feature_pooling : str
+        One of:
+          - "mean": use only spatial mean of each scattering coefficient.
+          - "mean_std": concatenate spatial mean and spatial std per coefficient.
 
     Returns
     -------
     features : torch.Tensor
-        Shape (batch, K) where K = 1 + L*J + L**2 * J*(J-1)//2.
+        Shape (batch, K) for ``feature_pooling='mean'`` and (batch, 2K) for
+        ``feature_pooling='mean_std'``, where
+        K = 1 + L*J + L**2 * J*(J-1)//2.
     """
     assert x.ndim == 3, f"Expected 3D input (batch, ny, nx), got shape {x.shape}"
     batch_size, ny, nx = x.shape
@@ -482,12 +537,73 @@ def compute_scattering_batch(x, J=5, L=8, normalize=True):
     x_in = x.unsqueeze(1).float()  # (B, 1, ny, nx)
     scattering = _get_scattering_obj(J, L, ny, nx, device)
     Sx = scattering(x_in)          # (B, 1, K, h, w)
-    features = Sx.mean(dim=(-2, -1)).squeeze(1)  # (B, K)
+    expected_k = scattering_n_coefficients(J, L, feature_pooling="mean")
+    actual_k = Sx.shape[2]
+    if actual_k != expected_k:
+        raise RuntimeError(
+            f"Unexpected scattering coefficient count: expected {expected_k}, got {actual_k} "
+            f"for J={J}, L={L}."
+        )
+    valid_feature_pooling = {"mean", "mean_std"}
+    if feature_pooling not in valid_feature_pooling:
+        raise ValueError(
+            f"Invalid feature_pooling='{feature_pooling}'. Expected one of {sorted(valid_feature_pooling)}."
+        )
 
-    if normalize:
-        features = torch.log1p(features)
+    if mask is None:
+        mean = Sx.mean(dim=(-2, -1)).squeeze(1)  # (B, K)
+        if feature_pooling == "mean_std":
+            std = Sx.std(dim=(-2, -1)).squeeze(1)
+            features = torch.cat([mean, std], dim=1)
+        else:
+            features = mean
+    else:
+        valid_pooling = {"soft", "hard"}
+        if mask_pooling not in valid_pooling:
+            raise ValueError(
+                f"Invalid mask_pooling='{mask_pooling}'. Expected one of {sorted(valid_pooling)}."
+            )
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        if mask.ndim != 3:
+            raise ValueError(f"mask must have shape (ny, nx) or (1, ny, nx), got {mask.shape}")
+        mask_f = mask.to(device=device, dtype=Sx.dtype).unsqueeze(1)  # (1, 1, ny, nx)
+        # Match scattering spatial grid exactly via adaptive pooling.
+        mask_low = torch.nn.functional.adaptive_avg_pool2d(mask_f, Sx.shape[-2:])
+        if mask_pooling == "hard":
+            mask_low = (mask_low >= mask_threshold).to(Sx.dtype)  # (1,1,h,w)
+        else:
+            mask_low = mask_low.clamp_(0.0, 1.0)
+        if mask_low.sum() <= 0:
+            raise ValueError(
+                "Mask has no valid support on scattering grid after downsampling. "
+                f"Input mask shape={tuple(mask.shape)}, scattering grid={tuple(Sx.shape[-2:])}."
+            )
+        mask_low = mask_low.unsqueeze(2)  # (1,1,1,h,w), broadcast over batch/K
+        denom = mask_low.sum(dim=(-2, -1)).clamp_min(1e-6)
+        mean = ((Sx * mask_low).sum(dim=(-2, -1)) / denom).squeeze(1)  # (B, K)
+        if feature_pooling == "mean_std":
+            sq = (Sx ** 2 * mask_low).sum(dim=(-2, -1)) / denom
+            var = (sq.squeeze(1) - mean ** 2).clamp_min(0.0)
+            std = torch.sqrt(var + 1e-8)
+            features = torch.cat([mean, std], dim=1)
+        else:
+            features = mean
+
+    valid_norms = {"log1p_zscore", "zscore", "none"}
+    if normalization not in valid_norms:
+        raise ValueError(
+            f"Invalid normalization='{normalization}'. Expected one of {sorted(valid_norms)}."
+        )
+
+    if normalize and normalization != "none":
+        if normalization == "log1p_zscore":
+            features = torch.log1p(features)
         mean = features.mean(dim=0, keepdim=True)
         std = features.std(dim=0, keepdim=True) + 1e-8
         features = (features - mean) / std
+
+    if not torch.isfinite(features).all():
+        raise RuntimeError("Non-finite scattering features detected after pooling/normalization.")
 
     return features.to(dtype=dtype)

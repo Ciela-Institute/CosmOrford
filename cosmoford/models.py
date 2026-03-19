@@ -13,6 +13,23 @@ from cosmoford.summaries import (power_spectrum_batch,
                                   scattering_n_coefficients)
 from torchvision.models.efficientnet import efficientnet_b0, efficientnet_b2, efficientnet_v2_s, efficientnet_v2_m
 
+
+def _inverse_reshape_field(kappa_reduced: torch.Tensor, fill_value: float = 0.0) -> torch.Tensor:
+  """Reconstruct full (1424, 176) maps from reduced (1834, 88) representation."""
+  bsz, _, _ = kappa_reduced.shape
+  part1 = kappa_reduced[:, :1424, :]
+  part2 = kappa_reduced[:, 1424:, :]
+  kappa_full = torch.full(
+    (bsz, 1424, 176),
+    fill_value,
+    dtype=kappa_reduced.dtype,
+    device=kappa_reduced.device,
+  )
+  kappa_full[:, :, :88] = part1
+  kappa_full[:, 620:1030, 88:] = part2
+  return kappa_full
+
+
 class RegressionModel(L.LightningModule):
 
   def __init__(self, backbone="efficientnet_b0",
@@ -23,19 +40,47 @@ class RegressionModel(L.LightningModule):
                hos_l1_min_snr: float = -8.0, hos_l1_max_snr: float = 8.0,
                hos_compute_mono: bool = False, hos_l1_only: bool = False,
                hos_peaks_only: bool = False,
-               use_scattering: bool = False, scattering_J: int = 5, scattering_L: int = 8,
-               warmup_steps: int = 1000, max_lr: float = 0.256,
-               decay_rate: float = 0.97, decay_every_epochs: int = 2, dropout_rate: float = 0.2,
-               loss_type: str = "log_prob", freeze_backbone: bool = False,
-               pretrained_checkpoint_path: str = None):
+                use_scattering: bool = False, scattering_J: int = 5, scattering_L: int = 8,
+                 scattering_normalization: str = "log1p_zscore",
+                scattering_feature_pooling: str = "mean",
+                scattering_mask_pooling: str = "soft",
+                scattering_geometry: str = "reduced",
+                augment_flip: bool = True,
+                augment_shift: bool = True,
+                 warmup_steps: int = 1000, max_lr: float = 0.256,
+                decay_rate: float = 0.97, decay_every_epochs: int = 2, dropout_rate: float = 0.2,
+                loss_type: str = "log_prob", freeze_backbone: bool = False,
+                pretrained_checkpoint_path: str = None):
     super().__init__()
     self.save_hyperparameters(ignore=['pretrained_checkpoint_path'])
 
     # Validate loss_type parameter
     if loss_type not in ["log_prob", "score"]:
       raise ValueError(f"loss_type must be 'log_prob' or 'score', got '{loss_type}'")
+    if scattering_normalization not in ["log1p_zscore", "zscore", "none"]:
+      raise ValueError(
+        "scattering_normalization must be one of ['log1p_zscore', 'zscore', 'none'], "
+        f"got '{scattering_normalization}'"
+      )
+    if scattering_mask_pooling not in ["soft", "hard"]:
+      raise ValueError(
+        "scattering_mask_pooling must be one of ['soft', 'hard'], "
+        f"got '{scattering_mask_pooling}'"
+      )
+    if scattering_feature_pooling not in ["mean", "mean_std"]:
+      raise ValueError(
+        "scattering_feature_pooling must be one of ['mean', 'mean_std'], "
+        f"got '{scattering_feature_pooling}'"
+      )
+    if scattering_geometry not in ["reduced", "full"]:
+      raise ValueError(
+        "scattering_geometry must be one of ['reduced', 'full'], "
+        f"got '{scattering_geometry}'"
+      )
 
-    self.mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
+    self.mask_reduced = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
+    self.mask_full = SURVEY_MASK
+    self.mask = self.mask_reduced
 
     # CNN backbone (optional)
     if use_cnn:
@@ -102,7 +147,11 @@ class RegressionModel(L.LightningModule):
 
     # Scattering transform head (optional)
     if use_scattering:
-      scat_dim = scattering_n_coefficients(scattering_J, scattering_L)
+      scat_dim = scattering_n_coefficients(
+        scattering_J,
+        scattering_L,
+        feature_pooling=scattering_feature_pooling,
+      )
       self.scattering_head = nn.Sequential(
         nn.Linear(scat_dim, 512),
         nn.LeakyReLU(),
@@ -194,11 +243,21 @@ class RegressionModel(L.LightningModule):
     # Scattering transform
     if self.hparams.use_scattering:
       with torch.no_grad():
+        if self.hparams.scattering_geometry == "full":
+          scat_maps = _inverse_reshape_field(x_orig)
+          survey_mask = torch.from_numpy(self.mask_full).to(x.device, dtype=x_orig.dtype)
+        else:
+          scat_maps = x_orig
+          survey_mask = torch.from_numpy(self.mask_reduced).to(x.device, dtype=x_orig.dtype)
         scat_features = compute_scattering_batch(
-          x_orig,
+          scat_maps,
           J=self.hparams.scattering_J,
           L=self.hparams.scattering_L,
           normalize=True,
+          normalization=self.hparams.scattering_normalization,
+          mask=survey_mask,
+          mask_pooling=self.hparams.scattering_mask_pooling,
+          feature_pooling=self.hparams.scattering_feature_pooling,
         )
       scat_features = self.scattering_head(scat_features)
 
@@ -292,18 +351,20 @@ class RegressionModel(L.LightningModule):
     # mask-boundary features in the scattering transform (and any other
     # summary statistic that does not take an explicit mask argument).
     batch_size = x.size(0)
-    # Random flips along nx dimension (dim=1)
-    flip_lr = torch.rand(batch_size, device=x.device) < 0.5
-    x[flip_lr] = torch.flip(x[flip_lr], dims=[1])
-    # Random flips along ny dimension (dim=2)
-    flip_ud = torch.rand(batch_size, device=x.device) < 0.5
-    x[flip_ud] = torch.flip(x[flip_ud], dims=[2])
+    if self.hparams.augment_flip:
+      # Random flips along nx dimension (dim=1)
+      flip_lr = torch.rand(batch_size, device=x.device) < 0.5
+      x[flip_lr] = torch.flip(x[flip_lr], dims=[1])
+      # Random flips along ny dimension (dim=2)
+      flip_ud = torch.rand(batch_size, device=x.device) < 0.5
+      x[flip_ud] = torch.flip(x[flip_ud], dims=[2])
 
-    # Random cyclic shifts (different for each sample) in nx and ny
-    shift_x = torch.randint(low=0, high=x.size(1), size=(batch_size,), device=x.device)
-    x = torch.stack([torch.roll(x[i], shifts=(shift_x[i].item(),), dims=(0,)) for i in range(batch_size)])
-    shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
-    x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
+    if self.hparams.augment_shift:
+      # Random cyclic shifts (different for each sample) in nx and ny
+      shift_x = torch.randint(low=0, high=x.size(1), size=(batch_size,), device=x.device)
+      x = torch.stack([torch.roll(x[i], shifts=(shift_x[i].item(),), dims=(0,)) for i in range(batch_size)])
+      shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
+      x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
 
     # Apply mask after augmentation so the survey footprint is always at the
     # same location in the (augmented) map.

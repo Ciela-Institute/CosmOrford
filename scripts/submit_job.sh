@@ -5,10 +5,11 @@
 # Usage:
 #   sbatch scripts/submit_job.sh configs/experiments/ps_hos_only.yaml
 #   sbatch --export=ALL,CONFIG=configs/experiments/ps_hos_only.yaml scripts/submit_job.sh
+#   sbatch --export=ALL,CONFIG=configs/experiments/ablation_hos_scat_J4.yaml,SEED=43 scripts/submit_job.sh
 
 # ── SLURM directives ─────────────────────────────────────────────────────────
 #SBATCH --tasks=1
-#SBATCH --time=00-12:00          # time (DD-HH:MM)
+#SBATCH --time=00-04:00          # time (DD-HH:MM)
 #SBATCH --account=rrg-lplevass
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=12       # matches num_workers in data config
@@ -21,11 +22,13 @@ set -euo pipefail
 
 # ── Config file ───────────────────────────────────────────────────────────────
 CONFIG="${1:-${CONFIG:-configs/experiments/ps_hos_only.yaml}}"
+SEED="${2:-${SEED:-42}}"
 
 echo "======================================================================"
 echo "CosmOrford – Training job"
 echo "======================================================================"
 echo "Config     : $CONFIG"
+echo "Seed       : $SEED"
 echo "Node       : $SLURMD_NODENAME"
 echo "Start time : $(date)"
 echo "======================================================================"
@@ -44,12 +47,14 @@ mkdir -p jobout
 
 # Compute nodes have no internet – save WandB run locally and sync afterwards.
 export WANDB_MODE=offline
+export COSMOFORD_SEED="$SEED"
 
 # ── Run training ──────────────────────────────────────────────────────────────
 # Disable tqdm progress bar (uses \r overwrites that corrupt log files) and
 # inject EpochProgressPrinter which emits one clean line per epoch instead.
-trainer fit \
+python -m cosmoford.trainer fit \
     --config "$CONFIG" \
+    --seed_everything="$SEED" \
     --trainer.devices=1 \
     --trainer.enable_progress_bar=false \
     "--trainer.callbacks+={class_path: cosmoford.trainer.EpochProgressPrinter}"

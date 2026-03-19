@@ -1,5 +1,7 @@
+import os
 import time
 import datetime
+import lightning as L
 import torch
 from lightning.pytorch.cli import ArgsType, LightningCLI
 from lightning import LightningModule, Trainer
@@ -68,13 +70,19 @@ class CustomSaveConfigCallback(SaveConfigCallback):
         return super().save_config(trainer, pl_module, stage)
 
 def trainer_cli(args: ArgsType = None, run: bool = True):
-    return LightningCLI(
+    seed = int(os.environ.get("COSMOFORD_SEED", "42"))
+    L.seed_everything(seed, workers=True)
+    cli = LightningCLI(
         args=args,
         run=run,
+        seed_everything_default=seed,
         save_config_kwargs={"overwrite": True},
         save_config_callback=CustomSaveConfigCallback,
         parser_kwargs={"parser_mode": "omegaconf"},
     )
+    # Console-script entrypoints call sys.exit(trainer_cli(...)).
+    # Returning a LightningCLI object would force exit code 1.
+    return None if run else cli
 
 if __name__ == "__main__":
     trainer_cli(run=True)
