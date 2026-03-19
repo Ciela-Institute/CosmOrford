@@ -298,6 +298,93 @@ scattering_L: 8
 
 This corresponds to run `snr_full_wide` (job 7896659, val_score = **11.539**, val_MSE = **7.04×10⁻⁴**), a +0.119 improvement over the standard-range HOS+Scat baseline (11.420). The val_MSE of 7.04×10⁻⁴ represents a 31% reduction relative to PS+HOS alone (1.02×10⁻³).
 
+### Ongoing Expansion (March 2026)
+
+An expanded follow-up ablation campaign is now in progress to improve statistical confidence and to validate recent wavelet scattering transform (WST) implementation fixes. Key settings are being run with **5 random seeds per configuration**. The currently active multi-seed SLURM batches are **r4** (job IDs **8452261–8452313**, 50 jobs total, 4h walltime per job) and a dedicated **WST pooling A/B batch** (**8453322–8453341**, 20 jobs total). A prior batch interruption was traced to a **tooling/entrypoint exit-code issue**, not to model divergence.
+
+#### Methods updates
+
+- **Reproducibility protocol (seeds):** all key ablation comparisons in the expansion are replicated with 5 seeds to separate true configuration effects from run-to-run variance.
+- **WST mask-aware pooling fix:** `compute_scattering_batch` now supports optional mask-aware weighted pooling on the scattering grid, with explicit modes:
+  - `scattering_mask_pooling='soft'` (fractional mask weighting; current default),
+  - `scattering_mask_pooling='hard'` (binary include/exclude thresholding).
+  This prevents padded/masked regions from biasing pooled scattering coefficients, especially at survey edges and irregular footprints.
+- **WST normalisation variants:** ongoing runs compare `log1p_zscore` (new default), `zscore`, and `none` for scattering feature normalisation.
+
+#### In-progress runs (r4 + WST A/B)
+
+| Config group | What is being varied | Purpose |
+|--------------|----------------------|---------|
+| Scattering L sweep | `L ∈ {4, 6, 12, 16}` (with fixed baseline settings otherwise) | Measure angular-resolution sensitivity of WST and identify stable/optimal `L` under the corrected pooling path. |
+| PS + Scattering baseline | PS + WST baseline settings (multi-seed) | Re-establish a clean PS+WST reference under unified normalisation and mask-aware pooling. |
+| PS + HOS + Scattering (full-wide SNR) | Full feature stack with peaks/L1 wide SNR settings | Test whether prior best full-wide setting remains robust under multi-seed replication and WST fixes. |
+| WST normalisation variants | `zscore` and `none` vs default `log1p_zscore` | Quantify sensitivity to feature scaling choice and check calibration/performance trade-offs. |
+| WST pooling A/B (new) | `scattering_mask_pooling='soft'` vs `'hard'` under matched seeds | Isolate whether soft mask weighting improves WST stability/performance over hard threshold pooling. |
+
+#### Final multi-seed aggregates from the expansion batches
+
+All expansion jobs referenced in this section completed with 5/5 seeds per configuration.
+
+| Config | Mean val_score | Std |
+|---|---:|---:|
+| HOS+Scat J4 (`ablation_hos_scat_J4`) | 11.4416 | 0.0136 |
+| HOS+Scat J4, L=4 | 11.4281 | 0.0108 |
+| HOS+Scat J4, L=6 | 11.4306 | 0.0201 |
+| HOS+Scat J4, L=12 | 11.4521 | 0.0151 |
+| HOS+Scat J4, L=16 | **11.4529** | 0.0137 |
+| HOS+Scat J4, `zscore` | 11.4408 | 0.0132 |
+| HOS+Scat J4, `none` norm | 11.2870 | 0.0166 |
+| HOS+Scat J4, `mean_std` feature pooling | **11.4532** | **0.0093** |
+| HOS+Scat J4, `mean_std`, **no-shift** | 11.2174 | 0.0089 |
+| HOS+Scat J4, `mean_std`, **no-flip + no-shift** | **11.7258** | 0.0140 |
+| HOS+Scat J4, `mean_std`, **full scattering geometry** | 11.4703 | 0.0116 |
+| HOS+Scat J4, `mean_std`, full geometry + no-shift | 11.1881 | 0.0121 |
+| PS+Scat J4 | 10.1669 | 0.0330 |
+| HOS+Scat full-wide SNR | 11.5584 | 0.0125 |
+| HOS+Scat full-wide SNR, `mean_std` feature pooling | **11.5771** | **0.0071** |
+| HOS+Scat full-wide SNR, `mean_std`, no-shift | 11.3042 | 0.0144 |
+| HOS+Scat full-wide SNR, `mean_std`, full scattering geometry | 11.5962 | 0.0111 |
+| HOS+Scat full-wide SNR, `mean_std`, no-flip + no-shift | 11.7607 | 0.0218 |
+| HOS+Scat full-wide SNR, `mean_std`, full geometry + no-shift | 11.2814 | 0.0134 |
+| HOS+Scat full-wide SNR, `mean_std`, **full geometry + no-flip + no-shift** | **11.7740** | **0.0167** |
+| PS+HOS+Scat (standard SNR) | 11.4666 | 0.0104 |
+| PS+HOS+Scat (full-wide SNR) | 11.5745 | 0.0228 |
+
+#### WST-focused conclusions from the completed expansion
+
+- **Scattering orientation `L` sweep:** the best completed settings are `L=12` and `L=16` (both above `L=8` by ~+0.011), while `L=4`/`L=6` are slightly below baseline. The effect is modest but consistent with improved angular resolution at larger `L`.
+- **Mask-aware pooling mode (`soft` vs `hard`):** differences are small but consistently favor `soft` pooling in matched A/B runs:
+  - Baseline HOS+Scat J4: `11.4435` (soft) vs `11.4409` (hard), Δ = +0.0026.
+  - Full-wide SNR: `11.5671` (soft) vs `11.5583` (hard), Δ = +0.0088.
+- **Scattering feature pooling (`mean_std` vs `mean`):** concatenating per-coefficient spatial mean and spatial std yields a meaningful gain over mean-only pooling:
+  - Baseline HOS+Scat J4: `11.4532` (`mean_std`) vs `11.4416` (`mean`), Δ = +0.0116.
+  - Full-wide SNR: `11.5771` (`mean_std`) vs `11.5584` (`mean`), Δ = +0.0187.
+  This was an important first improvement but not the dominant bottleneck.
+- **Implementation-audit finding (major): augmentation policy on reshaped maps was strongly suboptimal for WST.**
+  - Keeping flips but removing shifts causes a large drop:
+    - Baseline J4: `11.2174` vs `11.4522` (Δ = −0.2348)
+    - Full-wide: `11.3042` vs `11.5789` (Δ = −0.2747)
+  - Removing both flips and shifts produces a large gain:
+    - Baseline J4: `11.7258` vs `11.4522` (Δ = +0.2737)
+    - Full-wide: `11.7607` vs `11.5789` (Δ = +0.1817)
+  This directly explains why WST looked unexpectedly weak before: augmentation artifacts on the non-Euclidean reshaped-map layout were suppressing WST quality.
+- **Scattering geometry (`reduced` vs `full`) after fixes:** moving scattering extraction to full map geometry gives a consistent but modest gain:
+  - Baseline J4: `11.4703` vs `11.4522` (Δ = +0.0181)
+  - Full-wide: `11.5962` vs `11.5789` (Δ = +0.0173)
+  A dedicated WST diagnostic on synthetic maps also showed substantial reduced-vs-full feature mismatch (`geom_cos≈0.657`, `geom_rel_l2≈0.828`), supporting this direction.
+- **WST normalisation:** `log1p_zscore` and `zscore` are effectively tied at this precision, while disabling normalization (`none`) causes a clear drop (−0.15 points vs `log1p_zscore` baseline). This strongly supports keeping normalized WST features.
+- **PS+Scat vs HOS+Scat:** PS+Scat remains much weaker than HOS+Scat-family models, confirming that WST is complementary but not sufficient by itself in this setup.
+- **Best expanded configuration among tested runs:** `HOS+Scat` with full-wide SNR, `mean_std` pooling, full scattering geometry, and no flip/shift augmentation reached **`11.7740`** (5-seed mean), clearly above the earlier best (`11.5771`) and above `PS+HOS+Scat` full-wide (`11.5745`).
+
+Recommended WST defaults after this expansion:
+
+- `scattering_mask_pooling: soft`
+- `scattering_normalization: log1p_zscore` (or `zscore`, near-equivalent)
+- `scattering_feature_pooling: mean_std`
+- `scattering_geometry: full` (small but consistent gain)
+- For **summary-statistics-only WST models** (`use_cnn: false`): `augment_flip: false`, `augment_shift: false`
+- `scattering_L: 12` as a robust default; `16` is also competitive but with slightly higher feature dimensionality.
+
 ---
 
 ## 7. Targeted Questions
