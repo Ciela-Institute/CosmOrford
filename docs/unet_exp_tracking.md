@@ -133,10 +133,10 @@ to narrow candidates before submitting 24h training jobs.
 - ot_reg ≥ 0.01 → near-uniform → dropped
 - EMD would give sharper coupling (H=6.2) but sinkhorn ot_reg=1e-3 provides soft stochastic pairings that may help generalisation; start here first
 
-| W&B run name | eps | ot_method | ot_reg | SLURM job | `pqm/chi2_best` | `val_loss` | Notes |
-|---|---|---|---|---|---|---|---|
-| `unet/phase1/sinkhorn_reg1e-3` | 0.001 | sinkhorn_log | 1e-3 | 8413661 | — (training) | — | [config](../configs/experiments/unet_exp/phase1_sinkhorn_reg1e-3.yaml) · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/78t344gz) · soft plan, not bijective |
-| `unet/phase1/emd` | 0.001 | emd | — | 8413662 | **113.6** / last: 110.4 | 24.3 | [config](../configs/experiments/unet_exp/phase1_emd.yaml) · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fm5v6kxv) · exact bijection per step, H=6.2 |
+| W&B run name | eps | ot_method | ot_reg | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
+|---|---|---|---|---|---|---|---|---|
+| `unet/phase1/sinkhorn_reg1e-3` | 0.001 | sinkhorn_log | 1e-3 | 8413661 | — | — | 24.76 | [config](../configs/experiments/unet_exp/phase1_sinkhorn_reg1e-3.yaml) · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/78t344gz) · stopped ep.87, PQMass not run |
+| `unet/phase1/emd` | 0.001 | emd | — | 8413662 | **113.55** | 110.40 | 24.32 | [config](../configs/experiments/unet_exp/phase1_emd.yaml) · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fm5v6kxv) · exact bijection per step, H=6.2 |
 
 **Power spectrum (best checkpoint):**
 
@@ -160,9 +160,9 @@ to narrow candidates before submitting 24h training jobs.
 
 | W&B run name | Channels | Config | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
 |--------------|----------|--------|-----------|-----------------|-----------------|------------|-------|
-| `unet/phase2/arch_small` | [16, 32] | [config](../configs/experiments/unet_exp/phase2_arch_small.yaml) | 8450407 | — | — | — | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/xlwuyvlw) |
-| `unet/phase2/arch_medium` | [32, 64, 128] | — | — | **113.6** | 110.4 | 24.3 | reuse p1_emd · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fm5v6kxv) |
-| `unet/phase2/arch_large` | [32, 64, 128, 256] | [config](../configs/experiments/unet_exp/phase2_arch_large.yaml) | 8450409 | — | — | — | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/g3a5sswy) |
+| `unet/phase2/arch_small` | [16, 32] | [config](../configs/experiments/unet_exp/phase2_arch_small.yaml) | 8450407 | **108.70** | 106.48 | 24.76 | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/xlwuyvlw) |
+| `unet/phase2/arch_medium` | [32, 64, 128] | — | — | 113.55 | 110.40 | 24.32 | reuse p1_emd · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fm5v6kxv) |
+| `unet/phase2/arch_large` | [32, 64, 128, 256] | [config](../configs/experiments/unet_exp/phase2_arch_large.yaml) | 8450409 | 107.76 | **104.89** | 24.29 | emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/g3a5sswy) |
 
 **Power spectrum (best checkpoint):**
 
@@ -186,9 +186,9 @@ to narrow candidates before submitting 24h training jobs.
 
 | W&B run name | `sigma` | Config | SLURM job | `pqm/chi2_best` | `pqm/chi2_last` | `val_loss` | Notes |
 |--------------|---------|--------|-----------|-----------------|-----------------|------------|-------|
-| `unet/phase3/sigma_1e-4` | 0.0001 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-4.yaml) | 8459678 | — | — | — | small arch, emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fl9vjx9t) |
-| `unet/phase3/sigma_1e-3` | 0.001 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-3.yaml) | 8459679 | — | — | — | baseline · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/6wpl93lt) |
-| `unet/phase3/sigma_1e-2` | 0.01 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-2.yaml) | 8459680 | — | — | — | small arch, emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/50uyfjzv) |
+| `unet/phase3/sigma_1e-4` | 0.0001 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-4.yaml) | 8459678 | **113.03** | 108.16 | 24.61 | small arch, emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/fl9vjx9t) |
+| `unet/phase3/sigma_1e-3` | 0.001 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-3.yaml) | 8459679 | 106.64 | **106.23** | 24.76 | baseline · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/6wpl93lt) |
+| `unet/phase3/sigma_1e-2` | 0.01 | [config](../configs/experiments/unet_exp/phase3_sigma_1e-2.yaml) | 8459680 | 112.37 | 110.00 | 29.08 | small arch, emd, eps=0.001 · [W&B](https://wandb.ai/cosmostat/neurips-wl-challenge/runs/50uyfjzv) |
 
 **Power spectrum (best checkpoint):**
 
