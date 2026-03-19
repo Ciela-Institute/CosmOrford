@@ -421,6 +421,8 @@ while step < max_steps:
         batch = get_ot_batch([batch_logn, batch_nbody], rng_epoch, eps, device, args.ot_reg, ot_method=args.ot_method)
 
         for mb in iter_microbatches(batch, micro_bs):
+            if step >= max_steps:
+                break
             loss = train_step(
                 unet,
                 optimizer,
@@ -432,8 +434,6 @@ while step < max_steps:
             )
             step += 1
             pbar.update(1)
-            if step >= max_steps:
-                break
             wandb.log({
                 "train_loss": loss,
                 "learning_rate": optimizer.param_groups[0]['lr'],
@@ -539,8 +539,6 @@ while step < max_steps:
                     best_pqm_chi2 = chi2_epoch
                     _save_best_ckpt()
 
-        if step >= max_steps:
-            break
     epoch += 1
 pbar.close()
 
