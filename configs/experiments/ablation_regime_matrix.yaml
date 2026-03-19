@@ -1,0 +1,124 @@
+regime_scope: summary_statistics_only
+
+success_criteria:
+  repeats_per_key_cell: 5
+  significance:
+    robust_delta_score: 0.10
+    marginal_delta_score: 0.05
+
+axes:
+  feature_family:
+    levels:
+      - ps
+      - hos
+      - scattering
+      - ps_hos
+      - hos_scattering
+      - ps_scattering
+      - ps_hos_scattering
+  hos_variant:
+    levels: [full, l1_only, peaks_only]
+  hos_n_scales:
+    levels: [3, 4, 5, 6]
+  hos_n_bins:
+    levels: [31, 51]
+  hos_l1_nbins:
+    levels: [80, 120]
+  peaks_snr:
+    levels:
+      - [-1.0, 5.0]
+      - [-3.0, 7.0]
+      - [0.0, 8.0]
+      - [-5.0, 10.0]
+  l1_snr:
+    levels:
+      - [-5.0, 5.0]
+      - [-7.0, 7.0]
+      - [-10.0, 10.0]
+      - [-12.0, 12.0]
+  scattering_J:
+    levels: [2, 3, 4, 5]
+  scattering_L:
+    levels: [2, 4, 6, 8, 12, 16]
+
+covered_reference_configs:
+  - ablation_ps.yaml
+  - ablation_ps_fixed.yaml
+  - ablation_scattering_J3.yaml
+  - ablation_scattering_J4.yaml
+  - ablation_scattering_J5.yaml
+  - ablation_hos_ns3.yaml
+  - ablation_hos_ns4.yaml
+  - ablation_hos_ns6.yaml
+  - ablation_l1_ns3.yaml
+  - ablation_l1_ns4.yaml
+  - ablation_l1_ns6.yaml
+  - ablation_peaks_ns3.yaml
+  - ablation_peaks_ns4.yaml
+  - ablation_peaks_ns6.yaml
+  - ablation_hos_scat_J3.yaml
+  - ablation_hos_scat_J4.yaml
+  - ablation_hos_scat_J5.yaml
+  - ablation_ps_hos_fixed.yaml
+  - ablation_ps_l1_fixed.yaml
+  - ablation_ps_hos_scat_J4_fixed.yaml
+  - ablation_ps_hos_scat_fixed_r2.yaml
+  - ablation_snr_peaks_narrow.yaml
+  - ablation_snr_peaks_posonly.yaml
+  - ablation_snr_peaks_posonly_r2.yaml
+  - ablation_snr_peaks_wide.yaml
+  - ablation_snr_l1_narrow.yaml
+  - ablation_snr_l1_wide.yaml
+  - ablation_snr_l1_wide_bins120.yaml
+  - ablation_snr_l1_wider.yaml
+  - ablation_snr_full_wide.yaml
+
+planned_regimes:
+  p0:
+    - id: scat_l_sweep
+      description: Sweep scattering orientation count L at fixed strong baseline.
+      base_config: ablation_hos_scat_J4.yaml
+      variants:
+        scattering_L: [2, 4, 6, 12, 16]
+    - id: ps_scat_combo
+      description: Isolate PS+Scattering without HOS.
+      base_config: ablation_scattering_J4.yaml
+      variants:
+        use_ps: [true]
+        scattering_J: [3, 4, 5]
+    - id: ps_hos_scat_fullsnr
+      description: Test PS contribution on top of best wide-SNR HOS+Scattering.
+      base_config: ablation_snr_full_wide.yaml
+      variants:
+        use_ps: [true]
+        scattering_J: [3, 4, 5]
+  p1:
+    - id: snr_j_interaction
+      description: Probe whether SNR gains depend on scattering depth.
+      base_config: ablation_hos_scat_J4.yaml
+      variants:
+        scattering_J: [3, 5]
+        peaks_snr:
+          - [-3.0, 7.0]
+          - [-5.0, 10.0]
+        l1_snr:
+          - [-7.0, 7.0]
+          - [-10.0, 10.0]
+    - id: hos_scales_wide_snr
+      description: Recheck HOS scale preference under wide SNR settings.
+      base_config: ablation_snr_full_wide.yaml
+      variants:
+        hos_n_scales: [3, 5, 6]
+  p2:
+    - id: l1_bins_wide_snr
+      description: Fine check histogram resolution under wide SNR.
+      base_config: ablation_snr_full_wide.yaml
+      variants:
+        hos_l1_nbins: [60, 80, 120]
+
+key_cells_for_repeats:
+  - ablation_hos_scat_J4.yaml
+  - ablation_snr_full_wide.yaml
+  - ablation_ps_hos_scat_J4_fixed.yaml
+  - scat_l_sweep/scattering_L=4
+  - scat_l_sweep/scattering_L=8

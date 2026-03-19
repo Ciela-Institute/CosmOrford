@@ -1,0 +1,13 @@
+repeats:
+  seeds: [42, 43, 44, 45, 46]
+  key_configs:
+    - configs/experiments/ablation_hos_scat_J4.yaml
+    - configs/experiments/ablation_snr_full_wide.yaml
+    - configs/experiments/ablation_ps_hos_scat_J4_fixed.yaml
+    - configs/experiments/ablation_hos_scat_J4_L4.yaml
+    - configs/experiments/ablation_hos_scat_J4_L6.yaml
+    - configs/experiments/ablation_hos_scat_J4_L12.yaml
+    - configs/experiments/ablation_hos_scat_J4_L16.yaml
+    - configs/experiments/ablation_hos_scat_J4_zscore.yaml
+    - configs/experiments/ablation_ps_scat_J4.yaml
+    - configs/experiments/ablation_ps_hos_scat_full_wide.yaml

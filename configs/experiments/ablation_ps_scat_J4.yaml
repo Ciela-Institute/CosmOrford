@@ -1,0 +1,47 @@
+model:
+  class_path: cosmoford.models.RegressionModel
+  init_args:
+    use_cnn: false
+    use_ps: true
+    use_hos: false
+    use_scattering: true
+    scattering_J: 4
+    scattering_L: 8
+    warmup_steps: 500
+    max_lr: 0.002
+    decay_rate: 0.85
+    decay_every_epochs: 1
+    dropout_rate: 0.2
+    loss_type: "score"
+
+data:
+  class_path: cosmoford.dataset.ChallengeDataModule
+  init_args:
+    batch_size: 256
+    num_workers: 12
+
+trainer:
+  max_epochs: 30
+  accelerator: gpu
+  precision: "16-mixed"
+  log_every_n_steps: 1
+  check_val_every_n_epoch: 1
+  callbacks:
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: "step"
+    - class_path: cosmoford.trainer.EMAWeightAveraging
+    - class_path: ModelCheckpoint
+      init_args:
+        monitor: "val_score"
+        mode: "max"
+        save_top_k: 3
+        save_last: true
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: "ablation_ps_scat_J4"
+      project: "neurips-wl-challenge"
+      entity: "cosmostat"
+      log_model: true
+
