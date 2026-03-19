@@ -45,6 +45,7 @@ plt.rcParams.update({
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--exp_config", type=str, required=True, help="Path to experiment YAML")
+parser.add_argument("--sim_budget", type=int, default=None, help="Number of N-body simulations to train on (null = full dataset)")
 cli = parser.parse_args()
 
 with open(cli.exp_config) as f:
@@ -67,8 +68,18 @@ if args.dataset_dir_nbody is not None:
 else:
     dataset_nbody = load_dataset("cosmostat/neurips-wl-challenge-flat")
 dset_nbody = dataset_nbody.with_format('numpy')
-train_dataset_nbody = dset_nbody['train']
 test_dataset_nbody = dset_nbody['validation']
+
+# Subset N-body training set for simulation budget scan.
+# Use first N samples (range) to match the compressor budget scan convention.
+_train_nbody_full = dset_nbody['train']
+sim_budget = cli.sim_budget
+if sim_budget is not None:
+    _n_full = len(_train_nbody_full)
+    train_dataset_nbody = _train_nbody_full.select(range(sim_budget), keep_in_memory=True).with_format('numpy')
+    print(f"N-body budget: {sim_budget} / {_n_full} sims")
+else:
+    train_dataset_nbody = _train_nbody_full
 
 dataset_lognormal = load_from_disk(args.dataset_dir_logn_train)
 n = len(dataset_lognormal)
@@ -272,7 +283,9 @@ print('--Init WandB--')
 # Initialize Weights & Biases (always enabled)
 run_suffix = f"{np.random.randint(100, 1000)}"
 auto_run_name = f"emulator_training_{run_suffix}"
-wandb_kwargs = dict(project=args.wandb_project, name=args.wandb_run_name or auto_run_name, config={
+_base_run_name = args.wandb_run_name or auto_run_name
+_run_name = f"{_base_run_name}/budget_{sim_budget}" if sim_budget is not None else _base_run_name
+wandb_kwargs = dict(project=args.wandb_project, name=_run_name, config={
     "eps": args.eps,
     "num_epochs": args.num_epochs,
     "batch_size": args.batch_size,
@@ -282,6 +295,7 @@ wandb_kwargs = dict(project=args.wandb_project, name=args.wandb_run_name or auto
     "gamma": args.gamma,
     "ot_reg": args.ot_reg,
     "ot_method": args.ot_method,
+    "sim_budget": sim_budget,
     "model_config": config,
     "config_source": config_source,
 })
