@@ -287,7 +287,7 @@ _base_run_name = args.wandb_run_name or auto_run_name
 _run_name = f"{_base_run_name}/budget_{sim_budget}" if sim_budget is not None else _base_run_name
 wandb_kwargs = dict(project=args.wandb_project, name=_run_name, config={
     "eps": args.eps,
-    "num_epochs": args.num_epochs,
+    "max_steps": args.max_steps,
     "batch_size": args.batch_size,
     "sigma": args.sigma,
     "micro_batch_size": args.micro_batch_size,
@@ -388,13 +388,12 @@ def _run_pqm(model, label, seed_data, seed_rng, fig_path, chi2_key, plot_key, ex
 print('--Training--')
 
 eps = args.eps
-num_epochs = args.num_epochs
+max_steps = args.max_steps
 batch_size = min(args.batch_size, len(train_dataset_nbody))
 sigma = args.sigma
 micro_bs = int(args.micro_batch_size)
 
-min_dataset_size = min(len(train_dataset_lognormal), len(train_dataset_nbody))
-num_training_steps_total = (min_dataset_size // micro_bs) * num_epochs
+num_training_steps_total = max_steps
 nb_checkpoints = num_training_steps_total // 5
 pqm_step_interval = max(1, num_training_steps_total // max(1, args.n_pqm_evals))
 step = 0
@@ -411,7 +410,9 @@ def _save_best_ckpt():
     except Exception:
         pass
 
-for epoch in tqdm(range(num_epochs)):
+epoch = 0
+pbar = tqdm(total=max_steps, desc="training")
+while step < max_steps:
     ds_train_logn = get_iterable_dataset(train_dataset_lognormal, batch_size, int((epoch + 1) * 1000))
     ds_train_nbody = get_iterable_dataset(train_dataset_nbody, batch_size, epoch)
     rng_epoch = np.random.default_rng(args.seed + epoch)
@@ -430,6 +431,9 @@ for epoch in tqdm(range(num_epochs)):
                 sigma,
             )
             step += 1
+            pbar.update(1)
+            if step >= max_steps:
+                break
             wandb.log({
                 "train_loss": loss,
                 "learning_rate": optimizer.param_groups[0]['lr'],
@@ -526,8 +530,8 @@ for epoch in tqdm(range(num_epochs)):
             # PQMass evaluation at its own interval (controls best-checkpoint tracking)
             if step > 0 and step % pqm_step_interval == 0:
                 chi2_epoch = _run_pqm(
-                    unet, f"epoch {epoch}", 99, 0,
-                    fig_dir / f"pqm_unet_epoch_{epoch}.png",
+                    unet, f"step {step}", 99, 0,
+                    fig_dir / f"pqm_unet_step_{step}.png",
                     "pqm/chi2_unet_mean", "pqm/plot_unet",
                     extra_log={"epoch": epoch},
                 )
@@ -535,6 +539,10 @@ for epoch in tqdm(range(num_epochs)):
                     best_pqm_chi2 = chi2_epoch
                     _save_best_ckpt()
 
+        if step >= max_steps:
+            break
+    epoch += 1
+pbar.close()
 
 # Final trained model
 try:
