@@ -388,7 +388,7 @@ print('--Training--')
 
 eps = args.eps
 num_epochs = args.num_epochs
-batch_size = args.batch_size
+batch_size = min(args.batch_size, len(train_dataset_nbody))
 sigma = args.sigma
 micro_bs = int(args.micro_batch_size)
 
