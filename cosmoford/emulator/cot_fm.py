@@ -50,7 +50,6 @@ with open(cli.exp_config) as f:
     _cfg = yaml.safe_load(f)
 _cfg.pop("exp_name", None)
 
-# Defaults for fields not expected in the YAML
 _defaults = {"seed": 42}
 _defaults.update(_cfg)
 args = argparse.Namespace(**_defaults)
@@ -364,8 +363,12 @@ def _run_pqm(model, label, seed_data, seed_rng, fig_path, chi2_key, plot_key, ex
             log.update(extra_log)
         wandb.log(log)
         print(f"PQMass [{label}]: mean χ² = {np.mean(chi2_vals):.1f}")
+        return float(np.mean(chi2_vals))
     except Exception as e:
         print(f"PQMass [{label}] failed: {e}")
+        return None
+
+
 
 print('--Training--')
 
@@ -378,8 +381,20 @@ micro_bs = int(args.micro_batch_size)
 min_dataset_size = min(len(train_dataset_lognormal), len(train_dataset_nbody))
 num_training_steps_total = (min_dataset_size // micro_bs) * num_epochs
 nb_checkpoints = num_training_steps_total // 5
+pqm_step_interval = max(1, num_training_steps_total // max(1, args.n_pqm_evals))
 step = 0
 best_val_loss = float('inf')
+best_pqm_chi2 = float('inf')
+
+def _save_best_ckpt():
+    best_ckpt = str(ckpt_dir / "unet_best.pth")
+    torch.save(unet.state_dict(), best_ckpt)
+    try:
+        art = wandb.Artifact("unet-best", type="model")
+        art.add_file(best_ckpt)
+        wandb.log_artifact(art)
+    except Exception:
+        pass
 
 for epoch in tqdm(range(num_epochs)):
     ds_train_logn = get_iterable_dataset(train_dataset_lognormal, batch_size, int((epoch + 1) * 1000))
@@ -426,29 +441,11 @@ for epoch in tqdm(range(num_epochs)):
                     "epoch": epoch
                 })
 
-                if loss_t < best_val_loss:
+                if args.best_ckpt_metric == "val_loss" and loss_t < best_val_loss:
                     best_val_loss = loss_t
-                    best_ckpt = str(ckpt_dir / "unet_best.pth")
-                    torch.save(unet.state_dict(), best_ckpt)
-                    try:
-                        art = wandb.Artifact("unet-best", type="model")
-                        art.add_file(best_ckpt)
-                        wandb.log_artifact(art)
-                    except Exception:
-                        pass
+                    _save_best_ckpt()
 
             if step % nb_checkpoints == 0:
-                # Save and log checkpoint to wandb as an artifact
-                try:
-                    ckpt_path = str(ckpt_dir / f"unet_{epoch}.pth")
-                    # Ensure checkpoint exists on disk before adding to artifact
-                    torch.save(unet.state_dict(), ckpt_path)
-                    art = wandb.Artifact(f"unet-epoch-{epoch}", type="model")
-                    art.add_file(ckpt_path)
-                    wandb.log_artifact(art)
-                except Exception:
-                    pass
-                
                 ds_test_lognormal = get_iterable_dataset(test_dataset_lognormal, micro_bs, 0)
                 ds_test_nbody = get_iterable_dataset(test_dataset_nbody, micro_bs, 0)
                 batch_lognormal = next(ds_test_lognormal)
@@ -511,13 +508,17 @@ for epoch in tqdm(range(num_epochs)):
                     pass
                 plt.close(fig)
 
-                # PQMass evaluation: N-body vs UNet
-                _run_pqm(
+            # PQMass evaluation at its own interval (controls best-checkpoint tracking)
+            if step > 0 and step % pqm_step_interval == 0:
+                chi2_epoch = _run_pqm(
                     unet, f"epoch {epoch}", 99, 0,
                     fig_dir / f"pqm_unet_epoch_{epoch}.png",
                     "pqm/chi2_unet_mean", "pqm/plot_unet",
                     extra_log={"epoch": epoch},
                 )
+                if args.best_ckpt_metric == "pqm_chi2" and chi2_epoch is not None and chi2_epoch < best_pqm_chi2:
+                    best_pqm_chi2 = chi2_epoch
+                    _save_best_ckpt()
 
 
 # Final trained model
