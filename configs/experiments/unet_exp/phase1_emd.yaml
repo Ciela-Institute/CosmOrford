@@ -1,0 +1,24 @@
+exp_name: "unet/phase1/emd"
+
+# TODO: update config_yaml with best architecture from Phase 0
+config_yaml: /lustre09/project/6091102/juzgh/CosmOrford/configs/unet_condition.yaml
+
+wandb_project: neurips-wl-challenge
+wandb_entity: cosmostat
+wandb_run_name: "unet/phase1/emd"
+wandb_mode: offline
+
+ot_method: emd
+ot_reg: 0.1  # unused for emd but kept for consistency
+eps: 0.001  # expected best from Phase -1 diagnostic (≈ natural_eps)
+
+sigma: 0.001
+base_lr: 1.0e-3
+gamma: 0.9
+num_epochs: 100
+# EMD timing test (job 8338582): 0.02s per solve at bs=500 → 3.6M steps/day, fully feasible
+batch_size: 500
+micro_batch_size: 40
+
+dataset_dir_nbody: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/neurips-wl-challenge-flat
+dataset_dir_logn_train: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/lognormal
