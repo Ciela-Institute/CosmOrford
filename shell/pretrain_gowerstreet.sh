@@ -28,5 +28,5 @@ cd $WDIR
 uv run trainer fit \
     -c configs/experiments/pretrain_gowerstreet_nopatch_logp.yaml\
     --trainer.logger.init_args.name="effnet_v2_s_nbody_budget_final_$CURRENT_BUDGET" \
-    --trainer.logger.init_args.save_dir="$SAVE_DIR/lognormal/finetune/budget-$CURRENT_BUDGET"
+    --trainer.logger.init_args.save_dir="$SAVE_DIR/gowerstreet/finetune/budget-$CURRENT_BUDGET"
 

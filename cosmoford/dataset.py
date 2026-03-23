@@ -117,7 +117,7 @@ class ChallengeDataModule(L.LightningDataModule):
         elif self.dataset_mode == "gowerstreet":
             # Load gowerstreet pretraining dataset
             print("Loading Gower Street pretraining dataset...")
-            dset_gowerstreet = Dataset.load_from_disk("gs://neurips-wl/datasets/gowerstreet_patches")
+            dset_gowerstreet = Dataset.load_from_disk(shared_dir + "gowerstreet_patches")
             dset_gowerstreet = dset_gowerstreet.shuffle(seed=42)
             dset_gowerstreet = dset_gowerstreet.with_format("torch")
             self.train_dataset = dset_gowerstreet
