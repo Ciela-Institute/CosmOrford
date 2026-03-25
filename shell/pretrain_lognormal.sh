@@ -11,7 +11,7 @@
 
 
 # Running the python script
-source ../.venv/bin/activate 
+source ~/links/projects/rrg-lplevass/jlinhart/github/CosmOrford/.venv/bin/activate 
 wandb offline
 
 # Getting user-level config from global_config.yaml
@@ -25,7 +25,7 @@ export HF_HOME="~/links/scratch/cache"
 cd $WDIR
 
 # Running experiment.
-uv run trainer fit \
+trainer fit \
     -c configs/experiments/pretrain_lognormal_nopatch_logp.yaml\
     --trainer.logger.init_args.name="effnet_v2_s_nbody_budget_final_$CURRENT_BUDGET" \
     --trainer.logger.init_args.save_dir="$SAVE_DIR/lognormal/finetune/budget-$CURRENT_BUDGET"

@@ -1,6 +1,6 @@
 import torch
 import lightning as L
-from datasets import load_dataset, concatenate_datasets, Dataset
+from datasets import load_dataset, concatenate_datasets, Dataset, DatasetDict
 from torch.utils.data import DataLoader
 from cosmoford import THETA_MEAN, THETA_STD
 import numpy as np
@@ -105,7 +105,7 @@ class ChallengeDataModule(L.LightningDataModule):
     def setup(self, stage=None):
         # Load the main dataset
         shared_dir = "~/links/projects/rrg-lplevass/shared/wl_chall_data/"
-        dset = load_dataset(shared_dir + "neurips-wl-challenge-flat")
+        dset = DatasetDict.load_from_disk(shared_dir + "neurips-wl-challenge-flat")
         dset = dset.with_format("torch")
 
         # Determine which dataset to use for training

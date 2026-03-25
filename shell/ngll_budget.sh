@@ -12,7 +12,8 @@
 
 
 # Running the python script
-source ../.venv/bin/activate 
+module load python gcc arrow
+source .venv/bin/activate 
 wandb offline
 
 # Getting user-level config from global_config.yaml
@@ -33,10 +34,11 @@ CURRENT_BUDGET=${BUDGETS[$SLURM_ARRAY_TASK_ID]}
 echo "Running job for budget: $CURRENT_BUDGET"
 
 # We use dot notation to reach deep into the YAML structure
-uv run trainer fit \
-    -c configs/experiments/efficientnet_v2_s_logp.yaml \
+trainer fit \
+    -c configs/finetune_from_pretrain_nopatch_logp.yaml \
     --data.init_args.max_train_samples=$CURRENT_BUDGET \
     --trainer.logger.init_args.name="effnet_v2_s_nbody_budget_final_$CURRENT_BUDGET" \
     --trainer.logger.init_args.save_dir="$SAVE_DIR/budget_scan_nbody_final/budget-$CURRENT_BUDGET"
 
 
+    

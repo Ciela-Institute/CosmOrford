@@ -12,7 +12,8 @@ model:
     decay_every_epochs: 1
     dropout_rate: 0.1
     loss_type: "log_prob"
-    pretrained_checkpoint_path: "checkpoints/last.ckpt"  # UPDATE THIS PATH
+    # pretrained_checkpoint_path: "checkpoints/last.ckpt"  # UPDATE THIS PATH
+    pretrained_checkpoint_path: "/home/jlinhart/links/scratch/wl_chall/lognormal/finetune/budget-/neurips-wl-challenge/x7k9vyt0/checkpoints/last.ckpt"
     use_peft: false
     lora_r: 4
     lora_alpha: 8
@@ -21,16 +22,17 @@ model:
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
-    batch_size: 128
+    batch_size: 64
     num_workers: 12
     dataset_mode: "train"
 
 trainer:
   max_steps: 16000
   accelerator: gpu
-  precision: "16-mixed"
+  precision: "bf16-mixed"
   log_every_n_steps: 1
   val_check_interval: 500
+  check_val_every_n_epoch: null
   callbacks:
     - class_path: LearningRateMonitor
       init_args:
@@ -50,4 +52,5 @@ trainer:
       name: "finetune_from_pretrain_logp_v2_s"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
+      save_dir: "/home/jlinhart/links/scratch/wl_chall/models/budget_scan_nbody"
       log_model: true
