@@ -56,24 +56,39 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     import re
 
     checkpoint_dir = checkpoints_path / f"budget-{budget}"
+    # Support both flat layout (budget-N/*.ckpt) and nested layout (budget-N/checkpoints/*.ckpt)
+    if (checkpoint_dir / "checkpoints").exists():
+        checkpoint_dir = checkpoint_dir / "checkpoints"
 
-    # Strategy 1: Parse val_mse from checkpoint filenames
+    # Strategy 1a: Parse val_mse from checkpoint filenames (minimize)
+    # Strategy 1b: Parse val_log_prob from checkpoint filenames (maximize)
     if checkpoint_dir.exists():
         best_path = None
         best_mse = float("inf")
+        best_log_prob_path = None
+        best_log_prob = float("-inf")
         for ckpt in checkpoint_dir.glob("*.ckpt"):
-            if ckpt.name == "last.ckpt":
+            if "last" in ckpt.name:
                 continue
-            match = re.search(r"val_mse=([\d.]+)", ckpt.name)
-            if match:
-                mse = float(match.group(1))
+            match_mse = re.search(r"val_mse=([\d.]+)", ckpt.name)
+            if match_mse:
+                mse = float(match_mse.group(1))
                 if mse < best_mse:
                     best_mse = mse
                     best_path = str(ckpt)
+            match_lp = re.search(r"val_log_prob=([\d.]+)", ckpt.name)
+            if match_lp:
+                lp = float(match_lp.group(1))
+                if lp > best_log_prob:
+                    best_log_prob = lp
+                    best_log_prob_path = str(ckpt)
 
         if best_path is not None:
             print(f"Found best checkpoint for budget-{budget}: {best_path} (val_mse={best_mse:.6f})")
             return best_path
+        if best_log_prob_path is not None:
+            print(f"Found best checkpoint for budget-{budget}: {best_log_prob_path} (val_log_prob={best_log_prob:.6f})")
+            return best_log_prob_path
 
         # Strategy 2: Fall back to last.ckpt
         last_ckpt = checkpoint_dir / "last.ckpt"
