@@ -33,5 +33,7 @@ lightning_logs/
 
 *.lock
 jobout/*
+shell/jobout/*.out
+*.out
 
 global_config.yaml
