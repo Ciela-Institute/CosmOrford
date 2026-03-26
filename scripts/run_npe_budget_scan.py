@@ -23,7 +23,7 @@ Usage (local):
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
-
+from glob import glob
 
 
 @dataclass
@@ -56,39 +56,32 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     import re
 
     checkpoint_dir = checkpoints_path / f"budget-{budget}"
-    # Support both flat layout (budget-N/*.ckpt) and nested layout (budget-N/checkpoints/*.ckpt)
-    if (checkpoint_dir / "checkpoints").exists():
-        checkpoint_dir = checkpoint_dir / "checkpoints"
+    checkpoints = str(checkpoint_dir)
+    # print(checkpoints)
+    checkpoints = glob(checkpoints + "/**/*.ckpt", recursive=True)
 
-    # Strategy 1a: Parse val_mse from checkpoint filenames (minimize)
-    # Strategy 1b: Parse val_log_prob from checkpoint filenames (maximize)
+    # for ckpt in checkpoint_dir.glob("*.ckpt"): 
+    #     print(ckpt)
+    # Strategy 1: Parse val_mse from checkpoint filenames
     if checkpoint_dir.exists():
         best_path = None
-        best_mse = float("inf")
-        best_log_prob_path = None
-        best_log_prob = float("inf")
-        for ckpt in checkpoint_dir.glob("*.ckpt"):
-            if "last" in ckpt.name:
+        best_logp = float("inf")
+
+        for ckpt in checkpoints:
+            print(ckpt)
+            if ckpt == "last.ckpt":
                 continue
-            match_mse = re.search(r"val_mse=[\w=]*([\d.]+)", ckpt.name)
-            if match_mse:
-                mse = float(match_mse.group(1))
-                if mse < best_mse:
-                    best_mse = mse
+            # match = re.search(r"val_log_prob=([\d.]+)", ckpt)
+            match = re.search(r"val_log_prob=([-+]?\d*\.?\d+)", ckpt)
+            if match:
+                logp = float(match.group(1))
+                if logp < best_logp:
+                    best_logp = logp
                     best_path = str(ckpt)
-            match_lp = re.search(r"val_log_prob=[\w=]*([\d.]+)", ckpt.name)
-            if match_lp:
-                lp = float(match_lp.group(1))
-                if lp < best_log_prob:
-                    best_log_prob = lp
-                    best_log_prob_path = str(ckpt)
 
         if best_path is not None:
-            print(f"Found best checkpoint for budget-{budget}: {best_path} (val_mse={best_mse:.6f})")
+            print(f"Found best checkpoint for budget-{budget}: {best_path} (val_log_prob={best_logp:.6f})")
             return best_path
-        if best_log_prob_path is not None:
-            print(f"Found best checkpoint for budget-{budget}: {best_log_prob_path} (val_log_prob={best_log_prob:.6f})")
-            return best_log_prob_path
 
         # Strategy 2: Fall back to last.ckpt
         last_ckpt = checkpoint_dir / "last.ckpt"
@@ -512,9 +505,8 @@ if __name__ == "__main__":
     parser.add_argument("--budgets",
                         help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
                              "(overrides the budgets list in the config file)")
-    parser.add_argument("--offline", action="store_true",
-                        help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
-                             "is not found locally")
+    parser.add_argument("--offline", help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
+                             "is not found locally", type = bool)
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
