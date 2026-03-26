@@ -32,7 +32,7 @@ from datasets import load_from_disk
 from cosmoford.dataset import reshape_field_numpy
 from cosmoford.emulator.torch_models import build_unet2d_condition_with_y
 from cosmoford.emulator.neural_ode import solve_ode_forward
-from cosmoford.emulator.utils import pqm_evaluate
+from cosmoford.emulator.utils import pqm_evaluate, sample_one_per_cosmology
 
 plt.style.use("seaborn-v0_8")
 
@@ -51,6 +51,10 @@ parser.add_argument("--num_refs",       type=int, default=100,    help="PQMass r
 parser.add_argument("--re_tessellation", type=int, default=30,    help="Number of PQMass re-tessellations")
 parser.add_argument("--outdir",         type=str, default="pqm_eval")
 parser.add_argument("--seed",           type=int, default=42)
+parser.add_argument("--one_per_cosmo_ref", action="store_true",
+                    help="Sample exactly one realization per unique cosmology from the "
+                         "reference dataset (required for the NeurIPS WL Challenge N-body "
+                         "data which has 101 cosmologies × 256 realizations).")
 args = parser.parse_args()
 
 outdir = Path(args.outdir)
@@ -107,7 +111,22 @@ def load_maps(dataset_path, split, n, rng, second_split=False):
 
 # ── Load datasets ──────────────────────────────────────────────────────────────
 print("Loading reference dataset...")
-maps_ref, _ = load_maps(args.dataset_ref, args.split_ref, N, rng)
+if args.one_per_cosmo_ref:
+    # NeurIPS WL Challenge N-body: 101 cosmologies × 256 realizations. Only one realization per cosmology may be used to satisfy the i.i.d.
+    dset_ref = load_from_disk(args.dataset_ref)
+    split_pool = dset_ref[args.split_ref] if hasattr(dset_ref, 'keys') and args.split_ref in dset_ref else dset_ref
+    maps_ref, _ = sample_one_per_cosmology(split_pool.with_format("numpy"), rng)
+    print(f"  one_per_cosmo_ref: {len(maps_ref)} cosmologies found — using {len(maps_ref)} i.i.d. samples")
+    if args.num_refs >= len(maps_ref):
+        import warnings
+        warnings.warn(
+            f"num_refs={args.num_refs} >= n_cosmo={len(maps_ref)}. "
+            f"Reducing num_refs to {len(maps_ref) // 2} to leave enough samples per cell.",
+            stacklevel=1,
+        )
+        args.num_refs = len(maps_ref) // 2
+else:
+    maps_ref, _ = load_maps(args.dataset_ref, args.split_ref, N, rng)
 
 print("Loading candidate dataset...")
 split_cand = args.split_cand or args.split_ref
@@ -142,7 +161,10 @@ if args.checkpoint is not None:
 
 # ── PQMass ─────────────────────────────────────────────────────────────────────
 print(f"Running PQMass: {args.label_ref} vs {args.label_cand}...")
-chi2_vals, fig = pqm_evaluate(maps_ref, maps_cand, num_refs=args.num_refs, re_tessellation=args.re_tessellation)
+# Move maps_ref to Torch and put it on cuda
+torch_map_refs = torch.tensor(maps_ref, device=device)
+torch_maps_cand = torch.tensor(maps_cand, device=device)
+chi2_vals, fig = pqm_evaluate(torch_map_refs, torch_maps_cand, num_refs=args.num_refs, re_tessellation=args.re_tessellation)
 fig.suptitle(f"PQMass — {args.label_ref} vs {args.label_cand}", fontsize=13)
 
 out_path = outdir / f"pqm_{args.label_ref.replace(' ', '_')}_vs_{args.label_cand.replace(' ', '_')}.png"

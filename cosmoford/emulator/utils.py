@@ -113,14 +113,51 @@ def apply_mask(x, vmask=None, hmask=None):
     return x * mask
 
 
-def pqm_evaluate(maps_ref, maps_gen, num_refs=100, re_tessellation=20):
+def sample_one_per_cosmology(dataset, rng: np.random.Generator, theta_decimals: int = 5):
+    """Sample exactly one random realization per unique cosmology.
+
+    The NeurIPS WL Challenge N-body dataset has 101 cosmologies × 256 realizations.
+    Using more than one map per cosmology violates the i.i.d. assumption required by
+    PQMass — maps from the same cosmology share the same underlying parameters and
+    are therefore correlated at the distribution level.
+
+    Only the (lightweight) theta column is loaded to identify cosmologies; kappa maps
+    are loaded only for the selected indices.
+
+    Parameters
+    ----------
+    dataset : HuggingFace Dataset (numpy format)
+        Must have 'kappa' (H, W) and 'theta' fields.
+    rng : np.random.Generator
+    theta_decimals : int
+        Decimal places for rounding theta when identifying unique cosmologies.
+
+    Returns
+    -------
+    maps : np.ndarray, shape (N_cosmo, H_red, W_red)
+    theta : np.ndarray, shape (N_cosmo, n_params)
+    """
+    all_theta = np.array(dataset['theta'])                          # (N, n_params) — lightweight
+    theta_rounded = np.round(all_theta, decimals=theta_decimals)
+    _, inverse = np.unique(theta_rounded, axis=0, return_inverse=True)
+    n_cosmo = int(inverse.max()) + 1
+
+    chosen = [int(rng.choice(np.where(inverse == c)[0])) for c in range(n_cosmo)]
+    batch = dataset.select(chosen)[:]
+    kappa = np.array(batch['kappa'])          # (N_cosmo, H, W)
+    maps = reshape_field_numpy(kappa)         # (N_cosmo, H_red, W_red)
+    theta_out = np.array(batch['theta'])
+    return maps, theta_out
+
+
+def pqm_evaluate(maps_ref, maps_gen, num_refs=200, re_tessellation=200):
     """Compare two sets of maps using PQMass.
 
     Parameters
     ----------
-    maps_ref : np.ndarray, shape (N, H, W)
+    maps_ref : np.ndarray or torch.Tensor, shape (N, H, W)
         Reference maps (e.g., N-body validation set).
-    maps_gen : np.ndarray, shape (M, H, W)
+    maps_gen : np.ndarray or torch.Tensor, shape (M, H, W)
         Generated maps (e.g., UNet ODE output).
     num_refs : int
         Number of reference cells for the Voronoi tessellation.
@@ -134,16 +171,23 @@ def pqm_evaluate(maps_ref, maps_gen, num_refs=100, re_tessellation=20):
     fig : matplotlib.figure.Figure
         Histogram of chi² values vs the expected chi²(dof=num_refs-1) PDF.
     """
-    ref_flat = maps_ref.reshape(len(maps_ref), -1).astype(np.float32)
-    gen_flat = maps_gen.reshape(len(maps_gen), -1).astype(np.float32)
+    if isinstance(maps_ref, np.ndarray):
+        ref_flat = maps_ref.reshape(len(maps_ref), -1).astype(np.float32)
+    else:
+        ref_flat = maps_ref.reshape(len(maps_ref), -1).to(torch.float32).cpu().numpy()
+    
+    if isinstance(maps_gen, np.ndarray):
+        gen_flat = maps_gen.reshape(len(maps_gen), -1).astype(np.float32)
+    else:
+        gen_flat = maps_gen.reshape(len(maps_gen), -1).to(torch.float32).cpu().numpy()
 
-    chi2_vals = pqm_chi2(ref_flat, gen_flat, num_refs=num_refs, re_tessellation=re_tessellation)
+    chi2_vals = pqm_chi2(ref_flat, gen_flat, num_refs=num_refs, re_tessellation=re_tessellation, x_frac=1.0)
 
     dof = num_refs - 1
     x = np.linspace(max(0, dof - 4 * np.sqrt(2 * dof)), dof + 6 * np.sqrt(2 * dof), 300)
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.hist(chi2_vals, bins=15, density=True, alpha=0.7, color="steelblue", label="PQMass χ²")
+    ax.hist(chi2_vals, bins=35, density=True, alpha=0.7, color="steelblue", label="PQMass χ²")
     ax.plot(x, chi2_dist.pdf(x, df=dof), "r-", lw=2, label=f"χ²(dof={dof})")
     ax.axvline(np.mean(chi2_vals), color="steelblue", linestyle="--", lw=1.5,
                label=f"mean = {np.mean(chi2_vals):.1f}")

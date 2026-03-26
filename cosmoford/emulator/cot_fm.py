@@ -23,6 +23,7 @@ from cosmoford.emulator.utils import (
     apply_mask,
     iter_microbatches,
     pqm_evaluate,
+    sample_one_per_cosmology,
 )
 from cosmoford.emulator.neural_ode import solve_ode_forward
 
@@ -493,25 +494,46 @@ for epoch in tqdm(range(num_epochs)):
                 plt.close(fig)
 
                 # PQMass evaluation: N-body vs UNet
+                # maps_ref: one random realization per cosmology from the N-body validation
+                # set. The NeurIPS WL Challenge dataset has 101 cosmologies × 256
+                # realizations; using more than one per cosmology would violate the i.i.d.
+                # assumption required by PQMass.
+                # maps_gen: ODE output on an independent random draw of lognormal maps
+                # (no OT pairing) to keep the generated sample i.i.d.
                 try:
-                    pqm_bs = 500
-                    ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, pqm_bs, 99)
-                    ds_pqm_nbody = get_iterable_dataset(test_dataset_nbody, pqm_bs, 99)
+                    rng_pqm = np.random.default_rng(epoch)
+
+                    # Reference: one sample per cosmology (≤101 i.i.d. samples)
+                    maps_ref, _ = sample_one_per_cosmology(test_dataset_nbody, rng_pqm)
+                    n_cosmo = len(maps_ref)
+
+                    # Generated: random lognormal inputs → ODE (no OT pairing)
+                    ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, n_cosmo, epoch + 1000)
                     batch_pqm_logn = next(ds_pqm_logn)
-                    batch_pqm_nbody = next(ds_pqm_nbody)
-                    batch_pqm = get_ot_batch([batch_pqm_logn, batch_pqm_nbody], np.random.default_rng(0), eps, device, args.ot_reg)
+                    kappa_logn = np.array(batch_pqm_logn['kappa'])
+                    theta_logn = np.array(batch_pqm_logn['theta'])
+                    if kappa_logn.ndim == 4:  # (B, 10, H, W) — pick one map per sim
+                        idx = rng_pqm.integers(0, kappa_logn.shape[1])
+                        kappa_logn = kappa_logn[:, idx, :, :]
+                        theta_logn = theta_logn[:, 1:]
+                    x0_logn = reshape_field_numpy(kappa_logn)          # (B, H_red, W_red)
+                    x0_t = torch.from_numpy(x0_logn[:, None, :, :]).float()
+                    theta_t = torch.from_numpy(theta_logn).float()
 
                     pqm_chunks = []
-                    for start in range(0, batch_pqm['x0'].shape[0], micro_bs):
-                        x0_chunk = batch_pqm['x0'][start:start + micro_bs]
-                        theta_chunk = batch_pqm['theta_x0'][start:start + micro_bs]
+                    for start in range(0, x0_t.shape[0], micro_bs):
                         with torch.no_grad():
-                            pred_chunk = solve_ode_forward(x0_chunk, unet, theta_chunk, device)
+                            pred_chunk = solve_ode_forward(
+                                x0_t[start:start + micro_bs].to(device),
+                                unet,
+                                theta_t[start:start + micro_bs].to(device),
+                                device,
+                            )
                         pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
                     maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
-                    maps_ref = batch_pqm['x1'].detach().cpu().squeeze(1).numpy()  # (B, H, W)
 
-                    chi2_unet, fig_unet = pqm_evaluate(maps_ref, maps_gen)
+                    # num_refs must be < min(N_ref, N_gen); 50 is safely below 101
+                    chi2_unet, fig_unet = pqm_evaluate(maps_ref, maps_gen, num_refs=50)
                     fig_unet.suptitle(f"PQMass: N-body vs UNet (epoch {epoch})", fontsize=13)
 
                     pqm_unet_path = fig_dir / f"pqm_unet_epoch_{epoch}.png"
