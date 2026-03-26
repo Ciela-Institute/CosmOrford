@@ -59,28 +59,28 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     checkpoints = str(checkpoint_dir)
     # print(checkpoints)
     checkpoints = glob(checkpoints + "/**/*.ckpt", recursive=True)
-    # print(checkpoints)
 
     # for ckpt in checkpoint_dir.glob("*.ckpt"): 
     #     print(ckpt)
     # Strategy 1: Parse val_mse from checkpoint filenames
     if checkpoint_dir.exists():
         best_path = None
-        best_mse = float("inf")
+        best_logp = float("inf")
 
         for ckpt in checkpoints:
             print(ckpt)
             if ckpt == "last.ckpt":
                 continue
-            match = re.search(r"val_mse=([\d.]+)", ckpt)
+            # match = re.search(r"val_log_prob=([\d.]+)", ckpt)
+            match = re.search(r"val_log_prob=([-+]?\d*\.?\d+)", ckpt)
             if match:
-                mse = float(match.group(1))
-                if mse < best_mse:
-                    best_mse = mse
+                logp = float(match.group(1))
+                if logp < best_logp:
+                    best_logp = logp
                     best_path = str(ckpt)
 
         if best_path is not None:
-            print(f"Found best checkpoint for budget-{budget}: {best_path} (val_mse={best_mse:.6f})")
+            print(f"Found best checkpoint for budget-{budget}: {best_path} (val_log_prob={best_logp:.6f})")
             return best_path
 
         # Strategy 2: Fall back to last.ckpt
