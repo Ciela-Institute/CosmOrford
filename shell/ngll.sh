@@ -15,7 +15,7 @@ cd /home/noedia/links/projects/rrg-lplevass/noedia/wl_neurips/ciela_branch/CosmO
 source .venv/bin/activate 
 wandb offline
 # Define your budget samples
-BUDGETS=(100 200 500 1000 2000 5000 10000 20200)
+BUDGETS=(100 500, 1000, 5000, 10000, 20200)
 
 for N in "${BUDGETS[@]}"
 do

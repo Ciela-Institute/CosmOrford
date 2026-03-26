@@ -30,10 +30,12 @@ trainer:
     - class_path: EMAWeightAveraging
     - class_path: ModelCheckpoint
       init_args:
+        dirpath: "/home/noedia/links/scratch/wl_chall/models/budget_scan_nbody"
         monitor: "val_log_prob"
         mode: "min"
         save_top_k: 3
         save_last: true
+        filename: "step={step}-val_log_prob={val_log_prob:.4f}"
   logger:
     class_path: WandbLogger
     init_args:
