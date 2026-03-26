@@ -66,20 +66,20 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
         best_path = None
         best_mse = float("inf")
         best_log_prob_path = None
-        best_log_prob = float("-inf")
+        best_log_prob = float("inf")
         for ckpt in checkpoint_dir.glob("*.ckpt"):
             if "last" in ckpt.name:
                 continue
-            match_mse = re.search(r"val_mse=([\d.]+)", ckpt.name)
+            match_mse = re.search(r"val_mse=[\w=]*([\d.]+)", ckpt.name)
             if match_mse:
                 mse = float(match_mse.group(1))
                 if mse < best_mse:
                     best_mse = mse
                     best_path = str(ckpt)
-            match_lp = re.search(r"val_log_prob=(?:val_log_prob=)?([\d.]+)", ckpt.name)
+            match_lp = re.search(r"val_log_prob=[\w=]*([\d.]+)", ckpt.name)
             if match_lp:
                 lp = float(match_lp.group(1))
-                if lp > best_log_prob:
+                if lp < best_log_prob:
                     best_log_prob = lp
                     best_log_prob_path = str(ckpt)
 
