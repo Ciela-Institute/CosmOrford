@@ -76,7 +76,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
                 if mse < best_mse:
                     best_mse = mse
                     best_path = str(ckpt)
-            match_lp = re.search(r"val_log_prob=([\d.]+)", ckpt.name)
+            match_lp = re.search(r"val_log_prob=(?:val_log_prob=)?([\d.]+)", ckpt.name)
             if match_lp:
                 lp = float(match_lp.group(1))
                 if lp > best_log_prob:
