@@ -6,7 +6,7 @@
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=1
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=pretrain_gowerstreet
+#SBATCH --job-name=run_npe_nbody
 #SBATCH --output=jobout/%x_%A_%a.out
 
 # Running the python script
@@ -23,7 +23,7 @@ export HF_HOME="~/links/scratch/cache"
 # Going to the repository directory
 cd $WDIR
 
-uv run scripts/run_npe_budget_scan.py \
+python scripts/run_npe_budget_scan.py \
     --checkpoints_path=/home/noedia/links/scratch/wl_chall/budget_scan_nbody_final\
     --npe_results_path=/home/noedia/links/scratch/wl_chall/npe\
     --summaries_cache_path= \
