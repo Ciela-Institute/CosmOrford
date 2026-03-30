@@ -386,7 +386,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
-    vol.commit()
+    if vol is not None:
+        vol.commit()
     print(f"Results saved to {results_dir}")
     print(f"Budget {budget}: DONE (FoM = {fom_mean:.2f} ± {fom_std:.2f})")
     return results

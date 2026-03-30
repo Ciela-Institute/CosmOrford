@@ -35,7 +35,7 @@ trainer:
         mode: "min"
         save_top_k: 3
         save_last: true
-        filename: "step={step}-val_log_prob={val_log_prob:.4f}"
+        filename: "{step}-{val_log_prob:.4f}"
   logger:
     class_path: WandbLogger
     init_args:

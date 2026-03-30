@@ -1,50 +1,0 @@
-wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
-W&B offline. Running your script from this directory will only write metadata locally. Use `wandb disabled` to completely turn off W&B.
-/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/fabric/utilities/seed.py:44: No seed found, seed set to 0
-[rank: 0] Seed set to 0
-Using 16bit Automatic Mixed Precision (AMP)
-GPU available: True (cuda), used: True
-TPU available: False, using: 0 TPU cores
-HPU available: False, using: 0 HPUs
-wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
-wandb: Loading settings from /lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/wandb/settings
-wandb: Tracking run with wandb version 0.25.1
-wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
-wandb: Run data is saved locally in /home/noedia/links/scratch/wl_chall/models/pretrain_lognormal/wandb/offline-run-20260316_212022-dcqaj592
-Downloading data:   0%|          | 0/22 [00:00<?, ?files/s]Downloading data: 100%|██████████| 22/22 [00:00<00:00, 18359.47files/s]
-Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 1000 examples [00:02, 379.30 examples/s]Generating train split: 2000 examples [00:05, 387.82 examples/s]Generating train split: 3000 examples [00:07, 392.79 examples/s]Generating train split: 4000 examples [00:10, 400.21 examples/s]Generating train split: 5000 examples [00:12, 405.02 examples/s]Generating train split: 6000 examples [00:14, 407.17 examples/s]Generating train split: 7000 examples [00:17, 406.60 examples/s]Generating train split: 8000 examples [00:19, 409.18 examples/s]Generating train split: 9000 examples [00:22, 412.41 examples/s]Generating train split: 10000 examples [00:24, 415.32 examples/s]Generating train split: 11000 examples [00:26, 416.43 examples/s]Generating train split: 12000 examples [00:29, 422.28 examples/s]Generating train split: 13000 examples [00:31, 423.44 examples/s]Generating train split: 14000 examples [00:34, 419.97 examples/s]Generating train split: 15000 examples [00:36, 414.68 examples/s]Generating train split: 16000 examples [00:38, 418.25 examples/s]Generating train split: 17000 examples [00:41, 418.49 examples/s]Generating train split: 18000 examples [00:43, 418.91 examples/s]Generating train split: 19000 examples [00:46, 414.76 examples/s]Generating train split: 20000 examples [00:48, 402.30 examples/s]Generating train split: 20200 examples [00:49, 394.47 examples/s]Generating train split: 21162 examples [00:51, 402.29 examples/s]Generating train split: 22124 examples [00:54, 401.79 examples/s]Generating train split: 23086 examples [00:56, 399.91 examples/s]Generating train split: 24048 examples [00:59, 394.55 examples/s]Generating train split: 25010 examples [01:01, 397.97 examples/s]Generating train split: 25972 examples [01:03, 406.95 examples/s]Generating train split: 26934 examples [01:05, 413.08 examples/s]Generating train split: 27896 examples [01:08, 377.55 examples/s]Generating train split: 28858 examples [01:11, 370.91 examples/s]Generating train split: 29820 examples [01:14, 380.16 examples/s]Generating train split: 30782 examples [01:16, 380.25 examples/s]Generating train split: 31744 examples [01:19, 361.54 examples/s]Generating train split: 32706 examples [01:22, 358.43 examples/s]Generating train split: 33668 examples [01:24, 370.95 examples/s]Generating train split: 34630 examples [01:27, 365.29 examples/s]Generating train split: 35592 examples [01:29, 368.93 examples/s]Generating train split: 36554 examples [01:32, 359.03 examples/s]Generating train split: 37516 examples [01:35, 361.10 examples/s]Generating train split: 38478 examples [01:37, 371.71 examples/s]Generating train split: 39439 examples [01:40, 369.88 examples/s]Generating train split: 40400 examples [01:43, 361.30 examples/s]Generating train split: 40400 examples [01:43, 391.34 examples/s]
-Generating validation split: 0 examples [00:00, ? examples/s]Generating validation split: 943 examples [00:03, 278.77 examples/s]Generating validation split: 1886 examples [00:06, 299.25 examples/s]Generating validation split: 2829 examples [00:09, 311.81 examples/s]Generating validation split: 3772 examples [00:11, 335.77 examples/s]Generating validation split: 4714 examples [00:14, 350.91 examples/s]Generating validation split: 5656 examples [00:16, 372.81 examples/s]Generating validation split: 5656 examples [00:16, 344.48 examples/s]
-LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
-/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py:242: Precision 16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
-┏━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
-┃   ┃ Name         ┃ Type       ┃ Params ┃ Mode  ┃ FLOPs ┃
-┡━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
-│ 0 │ model        │ Sequential │ 20.2 M │ train │     0 │
-│ 1 │ reshape_head │ Sequential │      0 │ train │     0 │
-│ 2 │ compressor   │ Linear     │ 10.2 K │ train │     0 │
-│ 3 │ head         │ Sequential │    420 │ train │     0 │
-└───┴──────────────┴────────────┴────────┴───────┴───────┘
-Trainable params: 20.2 M                                                        
-Non-trainable params: 0                                                         
-Total params: 20.2 M                                                            
-Total estimated model params size (MB): 80                                      
-Modules in train mode: 719                                                      
-Modules in eval mode: 0                                                         
-Total FLOPs: 0                                                                  
-SLURM auto-requeueing enabled. Setting signal handlers.
-/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/torch/utils/data/dataloader.py:424: UserWarning: This DataLoader will create 8 worker processes in total. Our suggested max number of worker in current system is 1, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
-  self.check_worker_number_rationality()
-/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/lightning/pytorch/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
-/lustre09/project/6061843/noedia/wl_neurips/ciela_branch/CosmOrford/.venv/lib/python3.11/site-packages/torch/utils/data/dataloader.py:432: UserWarning: This DataLoader will create 8 worker processes in total. Our suggested max number of worker in current system is 1, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
-  self.check_worker_number_rationality()
-`Trainer.fit` stopped: `max_steps=6000` reached.
-Epoch 15/-2 ━━━━━━━━━━━━━━━━ 150/150 0:01:07 •        2.36it/s v_num: j592      
-                                     0:00:00                   val_log_prob:    
-                                                               51.348 val_score:
-                                                               -223.953 val_mse:
-                                                               0.016            
-<lightning.pytorch.cli.LightningCLI object at 0x151988075bd0>
-[1;34mwandb[0m: 
-[1;34mwandb[0m: You can sync this run to the cloud by running:
-[1;34mwandb[0m: [1mwandb sync /home/noedia/links/scratch/wl_chall/models/pretrain_lognormal/wandb/offline-run-20260316_212022-dcqaj592[0m
-[1;34mwandb[0m: Find logs at: [1;35m../../../../../../scratch/wl_chall/models/pretrain_lognormal/wandb/offline-run-20260316_212022-dcqaj592/logs[0m

@@ -1,10 +1,6 @@
 import torch
 import lightning as L
-<<<<<<< HEAD
 from datasets import load_dataset, concatenate_datasets, Dataset, DatasetDict
-=======
-from datasets import load_dataset, concatenate_datasets, Dataset, load_from_disk
->>>>>>> ab5e697 (Partial fix for npe)
 from torch.utils.data import DataLoader
 from cosmoford import THETA_MEAN, THETA_STD
 import numpy as np
