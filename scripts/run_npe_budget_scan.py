@@ -50,6 +50,10 @@ class NPEConfig:
     flow_transforms: int = 4
     flow_hidden_dim: int = 64
     n_posterior_samples: int = 10_000
+    n_fiducial_maps: int = 0  # 0 means "use all"
+    save_posterior_samples: bool = True
+    save_posterior_plots: bool = True
+    posterior_plot_bins: int = 80
 
     @classmethod
     def from_yaml(cls, path: str) -> "NPEConfig":
@@ -137,6 +141,25 @@ def find_best_checkpoint_for_metric(
                     return str(f)
 
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
+
+
+def _save_posterior_plot(samples_phys, output_path: Path, bins: int, title: str):
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    samples_phys = np.asarray(samples_phys)
+    fig, ax = plt.subplots(figsize=(5.8, 4.8))
+    h = ax.hist2d(samples_phys[:, 0], samples_phys[:, 1], bins=bins, cmap="magma")
+    ax.set_xlabel(r"$\Omega_m$")
+    ax.set_ylabel(r"$S_8$")
+    ax.set_title(title)
+    cbar = fig.colorbar(h[3], ax=ax)
+    cbar.set_label("Posterior sample density")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
 
 
 def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None):
@@ -405,11 +428,16 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     holdout = load_holdout("fiducial")
     holdout = holdout.with_format("numpy")
     kappa_all_fom = np.array(holdout["kappa"])
+    if cfg.n_fiducial_maps > 0:
+        kappa_all_fom = kappa_all_fom[:cfg.n_fiducial_maps]
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
     mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
     fom_values = []
+    store_posteriors = cfg.save_posterior_samples or cfg.save_posterior_plots
+    posterior_samples_norm = [] if store_posteriors else None
+    posterior_samples_phys = [] if store_posteriors else None
     with torch.no_grad():
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
@@ -426,6 +454,9 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
             # Unnormalize to physical parameters
             samples_phys = samples * THETA_STD[:2] + THETA_MEAN[:2]
+            if store_posteriors:
+                posterior_samples_norm.append(samples.astype(np.float32))
+                posterior_samples_phys.append(samples_phys.astype(np.float32))
 
             # Compute FoM = 1 / sqrt(det(Cov))
             cov = np.cov(samples_phys.T)  # (2, 2)
@@ -446,6 +477,30 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
     torch.save(best_state, results_dir / "npe_flow.pt")
 
+    posterior_plot_files = []
+    if store_posteriors:
+        posterior_samples_norm = np.stack(posterior_samples_norm, axis=0)
+        posterior_samples_phys = np.stack(posterior_samples_phys, axis=0)
+
+        if cfg.save_posterior_samples:
+            norm_samples_path = results_dir / "posterior_samples_norm.npy"
+            phys_samples_path = results_dir / "posterior_samples_phys.npy"
+            np.save(norm_samples_path, posterior_samples_norm)
+            np.save(phys_samples_path, posterior_samples_phys)
+            print(f"Saved posterior samples to {norm_samples_path} and {phys_samples_path}")
+
+        if cfg.save_posterior_plots:
+            for obs_idx, samples_phys_obs in enumerate(posterior_samples_phys):
+                out_plot = results_dir / f"posterior_fiducial_obs{obs_idx:02d}.png"
+                _save_posterior_plot(
+                    samples_phys_obs,
+                    out_plot,
+                    bins=cfg.posterior_plot_bins,
+                    title=f"Posterior (fiducial realization {obs_idx})",
+                )
+                posterior_plot_files.append(out_plot.name)
+            print(f"Saved {len(posterior_plot_files)} posterior plot(s) to {results_dir}")
+
     results = {
         "budget": budget,
         "fom_mean": float(fom_mean),
@@ -459,8 +514,14 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "flow_hidden_dim": cfg.flow_hidden_dim,
         "n_noise_realizations": cfg.n_noise_realizations,
         "n_fiducial_maps": len(kappa_all_fom),
+        "n_fiducial_maps_requested": int(cfg.n_fiducial_maps),
         "n_posterior_samples": cfg.n_posterior_samples,
         "compressor_checkpoint": ckpt_path,
+        "save_posterior_samples": bool(cfg.save_posterior_samples),
+        "save_posterior_plots": bool(cfg.save_posterior_plots),
+        "posterior_samples_norm_file": "posterior_samples_norm.npy" if cfg.save_posterior_samples else None,
+        "posterior_samples_phys_file": "posterior_samples_phys.npy" if cfg.save_posterior_samples else None,
+        "posterior_plot_files": posterior_plot_files if cfg.save_posterior_plots else [],
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
@@ -575,8 +636,12 @@ if __name__ == "__main__":
                         help="Path where NPE results will be written")
     parser.add_argument("--summaries_cache_path", required=True,
                         help="Path for caching pre-computed summaries")
-    parser.add_argument("--holdout_path", required=True,
-                        help="Path to holdout DatasetDict (save_to_disk format, 'train' and 'fiducial' splits)")
+    parser.add_argument("--holdout_path", required=False,
+                        help="Path to holdout DatasetDict (save_to_disk format, with 'train' and 'fiducial' splits)")
+    parser.add_argument("--holdout_train_path", required=False,
+                        help="Optional path to holdout train split dataset")
+    parser.add_argument("--holdout_fiducial_path", required=False,
+                        help="Optional path to holdout fiducial split dataset")
     parser.add_argument("--config", required=True,
                         help="Path to YAML config file (configs/experiments/npe_budget_scan.yaml)")
     parser.add_argument("--budgets",
@@ -597,7 +662,25 @@ if __name__ == "__main__":
         cfg.budgets = [int(b) for b in args.budgets.split(",")]
 
     from datasets import load_from_disk
-    holdout_ds = load_from_disk(args.holdout_path)
+    use_split_paths = args.holdout_train_path is not None or args.holdout_fiducial_path is not None
+    if use_split_paths:
+        if not (args.holdout_train_path and args.holdout_fiducial_path):
+            raise ValueError(
+                "When using split-specific holdout paths, both --holdout_train_path "
+                "and --holdout_fiducial_path must be provided."
+            )
+        holdout_train_ds = load_from_disk(args.holdout_train_path)
+        holdout_fiducial_ds = load_from_disk(args.holdout_fiducial_path)
+        holdout_splits = {"train": holdout_train_ds, "fiducial": holdout_fiducial_ds}
+        holdout_loader = lambda split, ds=holdout_splits: ds[split]
+    else:
+        if args.holdout_path is None:
+            raise ValueError(
+                "Either --holdout_path or both split-specific paths "
+                "(--holdout_train_path and --holdout_fiducial_path) must be provided."
+            )
+        holdout_ds = load_from_disk(args.holdout_path)
+        holdout_loader = lambda split, ds=holdout_ds: ds[split]
 
     for budget in cfg.budgets:
         _train_budget_core(
@@ -605,7 +688,7 @@ if __name__ == "__main__":
             Path(args.checkpoints_path),
             Path(args.npe_results_path),
             Path(args.summaries_cache_path),
-            lambda split, ds=holdout_ds: ds[split],
+            holdout_loader,
             cfg,
             offline=args.offline,
         )

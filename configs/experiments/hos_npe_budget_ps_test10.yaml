@@ -1,0 +1,26 @@
+# PS compressor -> NPE/FoM test config (10 fiducial realizations)
+
+budgets: [20200]
+
+compressor_class_path: "cosmoford.models_nopatch.StatsCompressorNoPatch"
+checkpoint_metric_name: "val_log_prob"
+checkpoint_mode: "min"
+wandb_entity: "cosmostat"
+wandb_project: "neurips-wl-challenge"
+wandb_budget_tag: "hos-npe-ps"
+
+n_noise_realizations: 16
+
+npe_epochs: 500
+npe_lr: 1.0e-3
+npe_batch_size: 512
+npe_patience: 50
+npe_seeds: 5
+flow_transforms: 4
+flow_hidden_dim: 64
+
+n_posterior_samples: 10000
+n_fiducial_maps: 10
+save_posterior_samples: true
+save_posterior_plots: true
+posterior_plot_bins: 80
