@@ -23,7 +23,6 @@ from cosmoford.emulator.utils import (
     apply_mask,
     iter_microbatches,
     pqm_evaluate,
-    sample_one_per_cosmology,
 )
 from cosmoford.emulator.neural_ode import solve_ode_forward
 
@@ -80,6 +79,11 @@ if sim_budget is not None:
     print(f"N-body budget: {sim_budget} / {_n_full} sims")
 else:
     train_dataset_nbody = _train_nbody_full
+
+# Sorted N-body dataset for PQMass: 256 entries × (101 cosmologies, H, W).
+# Each entry is one nuisance realization; the 101-axis gives unique cosmologies.
+# For fully i.i.d. samples we draw an independent nuisance index per cosmology.
+pqm_nbody_dataset = load_dataset("cosmostat/neurips-wl-challenge", split="train").with_format('numpy')
 
 dataset_lognormal = load_from_disk(args.dataset_dir_logn_train)
 n = len(dataset_lognormal)
@@ -347,26 +351,57 @@ except Exception:
 
 print('--PQMass evaluation--')
 
-def _run_pqm(model, label, seed_data, seed_rng, fig_path, chi2_key, plot_key, extra_log=None):
+def _run_pqm(model, label, seed, fig_path, chi2_key, plot_key, extra_log=None):
+    """PQMass evaluation with i.i.d. samples.
+
+    maps_ref: one map per cosmology from the sorted N-body dataset
+    (cosmostat/neurips-wl-challenge), with an independently drawn nuisance
+    index per cosmology to ensure full i.i.d.-ness.
+    maps_gen: ODE output on an independent random draw of lognormal maps
+    (no OT pairing) to keep the generated sample i.i.d.
+    """
     try:
-        pqm_bs = 500
-        ds_logn = get_iterable_dataset(test_dataset_lognormal, pqm_bs, seed_data)
-        ds_nbody = get_iterable_dataset(test_dataset_nbody, pqm_bs, seed_data)
-        batch_logn = next(ds_logn)
-        batch_nbody = next(ds_nbody)
-        batch = get_ot_batch([batch_logn, batch_nbody], np.random.default_rng(seed_rng), eps, device, args.ot_reg, ot_method=args.ot_method)
+        rng_pqm = np.random.default_rng(seed)
 
-        chunks = []
-        for start in range(0, batch['x0'].shape[0], micro_bs):
-            x0_c = batch['x0'][start:start + micro_bs]
-            theta_c = batch['theta_x0'][start:start + micro_bs]
+        # Reference: one i.i.d. sample per cosmology from the sorted dataset.
+        # Each of the 256 entries has kappa shape (101, H, W); pick an
+        # independent nuisance index per cosmology.
+        n_nuisance = len(pqm_nbody_dataset)  # 256
+        n_cosmo = 101
+        nuisance_ids = rng_pqm.integers(0, n_nuisance, size=n_cosmo)
+        kappa_ref = np.stack([
+            pqm_nbody_dataset[int(k)]['kappa'][c]
+            for c, k in enumerate(nuisance_ids)
+        ])  # (101, H, W)
+        maps_ref = reshape_field_numpy(kappa_ref)  # (101, H_red, W_red)
+
+        # Generated: random lognormal inputs → ODE (no OT pairing)
+        ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, n_cosmo, seed + 1000)
+        batch_pqm_logn = next(ds_pqm_logn)
+        kappa_logn = np.array(batch_pqm_logn['kappa'])
+        theta_logn = np.array(batch_pqm_logn['theta'])
+        if kappa_logn.ndim == 4:  # (B, 10, H, W) — pick one map per sim
+            idx = rng_pqm.integers(0, kappa_logn.shape[1])
+            kappa_logn = kappa_logn[:, idx, :, :]
+            theta_logn = theta_logn[:, 1:]
+        x0_logn = reshape_field_numpy(kappa_logn)          # (B, H_red, W_red)
+        x0_t = torch.from_numpy(x0_logn[:, None, :, :]).float()
+        theta_t = torch.from_numpy(theta_logn).float()
+
+        pqm_chunks = []
+        for start in range(0, x0_t.shape[0], micro_bs):
             with torch.no_grad():
-                pred_c = solve_ode_forward(x0_c, model, theta_c, device)
-            chunks.append(pred_c[-1])
-        maps_gen = np.concatenate(chunks, axis=0)
-        maps_ref = batch['x1'].detach().cpu().squeeze(1).numpy()
+                pred_chunk = solve_ode_forward(
+                    x0_t[start:start + micro_bs].to(device),
+                    model,
+                    theta_t[start:start + micro_bs].to(device),
+                    device,
+                )
+            pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
+        maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
 
-        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen)
+        # num_refs must be < min(N_ref, N_gen); 50 is safely below 101
+        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=50)
         fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -530,7 +565,7 @@ while step < max_steps:
             # PQMass evaluation at its own interval (controls best-checkpoint tracking)
             if step > 0 and step % pqm_step_interval == 0:
                 chi2_epoch = _run_pqm(
-                    unet, f"step {step}", 99, 0,
+                    unet, f"step {step}", step,
                     fig_dir / f"pqm_unet_step_{step}.png",
                     "pqm/chi2_unet_mean", "pqm/plot_unet",
                     extra_log={"epoch": epoch},
@@ -553,13 +588,13 @@ except Exception:
     pass
 
 # Post-training PQMass: evaluate both last and best checkpoints on a fixed test set
-_run_pqm(unet, "last", 42, 42, fig_dir / "pqm_final_last.png", "pqm/chi2_last_mean", "pqm/plot_last")
+_run_pqm(unet, "last", 42, fig_dir / "pqm_final_last.png", "pqm/chi2_last_mean", "pqm/plot_last")
 
 best_ckpt_path = ckpt_dir / "unet_best.pth"
 if best_ckpt_path.exists():
     unet_best = build_unet2d_condition_with_y(config).to(device)
     unet_best.load_state_dict(torch.load(str(best_ckpt_path), map_location=device))
     unet_best.eval()
-    _run_pqm(unet_best, "best", 42, 42, fig_dir / "pqm_final_best.png", "pqm/chi2_best_mean", "pqm/plot_best")
+    _run_pqm(unet_best, "best", 42, fig_dir / "pqm_final_best.png", "pqm/chi2_best_mean", "pqm/plot_best")
 
 wandb.finish()
