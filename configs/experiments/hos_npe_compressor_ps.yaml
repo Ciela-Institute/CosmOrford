@@ -1,0 +1,55 @@
+model:
+  class_path: cosmoford.models_nopatch.StatsCompressorNoPatch
+  init_args:
+    summary_dim: 8
+    summary_hidden_dim: 512
+    summary_n_hidden: 3
+    summary_dropout_rate: 0.1
+
+    use_ps: true
+    use_hos: false
+    use_scattering: false
+
+    augment_flip: false
+    augment_shift: false
+    warmup_steps: 500
+    max_lr: 0.001
+    decay_rate: 0.85
+    decay_every_epochs: 1
+    loss_type: "log_prob"
+    lr_schedule: "step"
+    n_val_noise: 8
+
+data:
+  class_path: cosmoford.dataset.ChallengeDataModule
+  init_args:
+    batch_size: 256
+    num_workers: 12
+    max_train_samples: 20200
+
+trainer:
+  max_epochs: 30
+  accelerator: gpu
+  precision: "16-mixed"
+  log_every_n_steps: 1
+  check_val_every_n_epoch: 1
+  callbacks:
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: "step"
+    - class_path: cosmoford.trainer.EMAWeightAveraging
+    - class_path: ModelCheckpoint
+      init_args:
+        monitor: "val_log_prob"
+        mode: "min"
+        save_top_k: 3
+        save_last: true
+        filename: "epoch={epoch:02d}-step={step}-val_log_prob={val_log_prob:.4f}"
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: "hos_npe_ps_budget20200"
+      project: "neurips-wl-challenge"
+      entity: "cosmostat"
+      tags: ["hos-npe", "analytical", "ps", "budget-20200"]
+      log_model: true

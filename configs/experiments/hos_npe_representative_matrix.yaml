@@ -1,0 +1,19 @@
+hos_npe_representative:
+  budget: 20200
+  compressors:
+    - name: ps
+      config: configs/experiments/hos_npe_compressor_ps.yaml
+      npe_config: configs/experiments/hos_npe_budget_ps.yaml
+      wandb_tag: hos-npe-ps
+    - name: l1
+      config: configs/experiments/hos_npe_compressor_l1.yaml
+      npe_config: configs/experiments/hos_npe_budget_l1.yaml
+      wandb_tag: hos-npe-l1
+    - name: hos
+      config: configs/experiments/hos_npe_compressor_hos.yaml
+      npe_config: configs/experiments/hos_npe_budget_hos.yaml
+      wandb_tag: hos-npe-hos
+    - name: hos_scat
+      config: configs/experiments/hos_npe_compressor_hos_scat.yaml
+      npe_config: configs/experiments/hos_npe_budget_hos_scat.yaml
+      wandb_tag: hos-npe-hos-scat
