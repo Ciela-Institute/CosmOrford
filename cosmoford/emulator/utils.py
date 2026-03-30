@@ -34,6 +34,12 @@ def preprocess_batch(batch, rng: np.random.Generator):
     """
     batch_lognormal, batch_nbody = batch
     idx = rng.integers(low=0, high=10)
+
+    print(batch_lognormal.keys())
+
+    if isinstance(batch_lognormal, dict) and 'maps' in batch_lognormal:
+        batch_lognormal = {'kappa': batch_lognormal['maps'], 'theta': batch_lognormal['theta']}
+
     shape_dataset = batch_lognormal['kappa'].shape
     # Lognormal maps: (B, 10, H, W) -> pick idx -> (B, H, W) -> reshape (B, 1834, 88)
     kappa_logn = batch_lognormal['kappa']

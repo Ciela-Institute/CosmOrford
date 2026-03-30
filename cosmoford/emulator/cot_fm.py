@@ -81,6 +81,11 @@ else:
     train_dataset_nbody = _train_nbody_full
 
 dataset_lognormal = load_from_disk(args.dataset_dir_logn_train)
+
+
+if isinstance(dataset_lognormal, dict) and "train" in dataset_lognormal:
+    dataset_lognormal = dataset_lognormal['train']
+
 n = len(dataset_lognormal)
 perm = np.random.default_rng(2).permutation(n).tolist()
 n_test = int(0.2 * n)
@@ -138,6 +143,11 @@ def sample_ot_plan(
     reg: float,
     ot_method: str = "sinkhorn",
 ):
+
+    print("x0", x0)
+    print("x1", x1)
+
+
     x0_t = torch.from_numpy(x0.reshape(x0.shape[0], -1)).float().to(device)
     x1_t = torch.from_numpy(x1.reshape(x1.shape[0], -1)).float().to(device)
     yx0_t = torch.from_numpy(np.array(yx0)).float().to(device)
@@ -153,6 +163,8 @@ def sample_ot_plan(
         # sinkhorn_log: log-domain arithmetic, numerically stable for small reg
         # numItermax=50000 ensures convergence at ot_reg=1e-3
         tp = ot.sinkhorn(a, b, M, reg=reg, method="sinkhorn_log", numItermax=50000)
+
+    print("tp:", tp)
     return get_paired_data(tp.cpu().numpy(), n, rng)
 
 
