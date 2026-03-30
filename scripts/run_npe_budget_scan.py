@@ -143,6 +143,25 @@ def find_best_checkpoint_for_metric(
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
+def _hist_credible_levels(hist2d, probs=(0.68, 0.95)):
+    import numpy as np
+
+    h = np.asarray(hist2d, dtype=np.float64)
+    flat = h.ravel()
+    if flat.size == 0 or np.all(flat <= 0):
+        return [0.0 for _ in probs]
+    idx = np.argsort(flat)[::-1]
+    sorted_vals = flat[idx]
+    cdf = np.cumsum(sorted_vals)
+    cdf = cdf / cdf[-1]
+    levels = []
+    for p in probs:
+        k = int(np.searchsorted(cdf, p, side="left"))
+        k = min(max(k, 0), sorted_vals.size - 1)
+        levels.append(float(sorted_vals[k]))
+    return levels
+
+
 def _save_posterior_plot(samples_phys, output_path: Path, bins: int, title: str):
     import numpy as np
     import matplotlib
@@ -157,6 +176,47 @@ def _save_posterior_plot(samples_phys, output_path: Path, bins: int, title: str)
     ax.set_title(title)
     cbar = fig.colorbar(h[3], ax=ax)
     cbar.set_label("Posterior sample density")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def _save_posterior_contour_plot(samples_phys, output_path: Path, bins: int, title: str):
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    samples_phys = np.asarray(samples_phys)
+    hist, xedges, yedges = np.histogram2d(
+        samples_phys[:, 0],
+        samples_phys[:, 1],
+        bins=bins,
+        density=True,
+    )
+    xcenters = 0.5 * (xedges[:-1] + xedges[1:])
+    ycenters = 0.5 * (yedges[:-1] + yedges[1:])
+    xx, yy = np.meshgrid(xcenters, ycenters, indexing="xy")
+    zz = hist.T  # contour expects (len(y), len(x))
+    levels = _hist_credible_levels(zz, probs=(0.68, 0.95))
+    levels = sorted(set(levels))
+    if len(levels) == 1:
+        levels = [max(levels[0] * 0.5, 1e-12), levels[0]]
+
+    fig, ax = plt.subplots(figsize=(5.8, 4.8))
+    ax.contourf(xx, yy, zz, levels=24, cmap="magma", alpha=0.55)
+    ax.contour(
+        xx,
+        yy,
+        zz,
+        levels=levels,
+        colors=["#4E79A7", "#E15759"][: len(levels)],
+        linewidths=2.0,
+    )
+    ax.scatter(samples_phys[:, 0], samples_phys[:, 1], s=1.0, alpha=0.08, color="black")
+    ax.set_xlabel(r"$\Omega_m$")
+    ax.set_ylabel(r"$S_8$")
+    ax.set_title(title)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -478,6 +538,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     torch.save(best_state, results_dir / "npe_flow.pt")
 
     posterior_plot_files = []
+    posterior_contour_files = []
     if store_posteriors:
         posterior_samples_norm = np.stack(posterior_samples_norm, axis=0)
         posterior_samples_phys = np.stack(posterior_samples_phys, axis=0)
@@ -499,6 +560,14 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                     title=f"Posterior (fiducial realization {obs_idx})",
                 )
                 posterior_plot_files.append(out_plot.name)
+                out_contour = results_dir / f"posterior_fiducial_obs{obs_idx:02d}_contour.png"
+                _save_posterior_contour_plot(
+                    samples_phys_obs,
+                    out_contour,
+                    bins=cfg.posterior_plot_bins,
+                    title=f"Posterior contours (fiducial realization {obs_idx})",
+                )
+                posterior_contour_files.append(out_contour.name)
             print(f"Saved {len(posterior_plot_files)} posterior plot(s) to {results_dir}")
 
     results = {
@@ -522,6 +591,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "posterior_samples_norm_file": "posterior_samples_norm.npy" if cfg.save_posterior_samples else None,
         "posterior_samples_phys_file": "posterior_samples_phys.npy" if cfg.save_posterior_samples else None,
         "posterior_plot_files": posterior_plot_files if cfg.save_posterior_plots else [],
+        "posterior_contour_files": posterior_contour_files if cfg.save_posterior_plots else [],
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
