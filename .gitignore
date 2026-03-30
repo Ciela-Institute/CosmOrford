@@ -30,3 +30,5 @@ lightning_logs/
 
 # Generated outputs
 *.pdf
+shell/jobout/
+shell
