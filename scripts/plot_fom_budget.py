@@ -13,6 +13,19 @@ from pathlib import Path
 import json
 
 
+def _collect_results(root: Path):
+    all_results = []
+    if root.exists():
+        for d in sorted(root.iterdir()):
+            rfile = d / "results.json"
+            if rfile.exists():
+                rec = json.loads(rfile.read_text())
+                rec["_run_group"] = root.name
+                rec["_budget_dir"] = d.name
+                all_results.append(rec)
+    return all_results
+
+
 def _plot_core(npe_results_path: Path, output_path: str):
     """Load results from disk, plot, and save to output_path."""
     import numpy as np
@@ -20,34 +33,51 @@ def _plot_core(npe_results_path: Path, output_path: str):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    all_results = []
-    if npe_results_path.exists():
-        for d in sorted(npe_results_path.iterdir()):
-            rfile = d / "results.json"
-            if rfile.exists():
-                all_results.append(json.loads(rfile.read_text()))
+    all_results = _collect_results(npe_results_path)
+    if not all_results and npe_results_path.exists():
+        for child in sorted(npe_results_path.iterdir()):
+            if child.is_dir():
+                all_results.extend(_collect_results(child))
 
     if not all_results:
         raise RuntimeError(f"No results found in {npe_results_path}")
 
-    for r in sorted(all_results, key=lambda x: x["budget"]):
-        print(f"  budget={r['budget']:>6d}: FoM = {r['fom_mean']:.2f} ± {r['fom_std']:.2f} "
-              f"(val_nll={r['best_val_nll']:.4f})")
+    for r in sorted(all_results, key=lambda x: (x.get("_run_group", ""), x["budget"])):
+        group = r.get("_run_group", "")
+        compressor = r.get("compressor_class_path", "unknown")
+        print(
+            f"  [{group}] budget={r['budget']:>6d}: FoM = {r['fom_mean']:.2f} ± {r['fom_std']:.2f} "
+            f"(val_nll={r['best_val_nll']:.4f}, compressor={compressor})"
+        )
 
-    budgets = np.array([r["budget"] for r in all_results])
-    fom_means = np.array([r["fom_mean"] for r in all_results])
-    fom_stds = np.array([r["fom_std"] for r in all_results])
-
-    order = np.argsort(budgets)
-    budgets, fom_means, fom_stds = budgets[order], fom_means[order], fom_stds[order]
-
+    groups = sorted(set(r.get("_run_group", "default") for r in all_results))
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.errorbar(budgets, fom_means, yerr=fom_stds,
-                fmt="o-", color="C0", markersize=8, capsize=4, linewidth=1.5, zorder=5)
+    cmap = plt.cm.get_cmap("tab10", max(len(groups), 1))
+    for idx, group in enumerate(groups):
+        rows = [r for r in all_results if r.get("_run_group", "default") == group]
+        budgets = np.array([r["budget"] for r in rows])
+        fom_means = np.array([r["fom_mean"] for r in rows])
+        fom_stds = np.array([r["fom_std"] for r in rows])
+        order = np.argsort(budgets)
+        budgets, fom_means, fom_stds = budgets[order], fom_means[order], fom_stds[order]
+        ax.errorbar(
+            budgets,
+            fom_means,
+            yerr=fom_stds,
+            fmt="o-",
+            color=cmap(idx),
+            markersize=6,
+            capsize=3,
+            linewidth=1.2,
+            zorder=5,
+            label=group,
+        )
     ax.set_xscale("log")
     ax.set_xlabel("Number of compressor training simulations", fontsize=14)
     ax.set_ylabel("Figure of Merit (FoM)", fontsize=14)
     ax.set_title("Inference quality vs simulation budget", fontsize=15)
+    if len(groups) > 1:
+        ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     ax.tick_params(labelsize=12)
     fig.tight_layout()

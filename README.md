@@ -35,7 +35,7 @@ Posterior samples are drawn for maps from the `fiducial` split of the holdout da
 | Script | Description |
 |---|---|
 | `cosmoford/models_nopatch.py` | Compressor model, trained via `cosmoford/trainer.py` |
-| `scripts/run_npe_budget_scan.py` | Trains the NPE flow and computes FoM, sweeping over simulation budgets |
+| `scripts/run_npe_budget_scan.py` | Trains the NPE flow and computes FoM, sweeping over simulation budgets; supports pluggable compressor classes |
 | `scripts/plot_fom_budget.py` | Plots FoM vs. simulation budget from saved results |
 
 **Datasets:**
@@ -54,9 +54,42 @@ Posterior samples are drawn for maps from the `fiducial` split of the holdout da
 
 ### 🔢 Option A — Analytical summaries
 
-Physically motivated statistics computed directly from the masked convergence maps, such as peak counts, wavelet ℓ₁-norm, or power spectrum. A small MLP is then trained to compress these hand-crafted features into an 8D vector by maximizing a Gaussian log-likelihood.
+Physically motivated statistics computed directly from the masked convergence maps, such as peak counts, wavelet ℓ₁-norm, power spectrum, and scattering features.  
+To align with the neural-summary NPE pipeline, analytical summaries now use `StatsCompressorNoPatch` (`cosmoford/models_nopatch.py`) with the same `compress(x) -> 8D` interface and `val_log_prob` checkpoint convention.
 
-**Training script:** `trainer fit -c <config TBD>`
+Representative stage-1 configs (fixed budget 20200):
+
+- `configs/experiments/hos_npe_compressor_ps.yaml`
+- `configs/experiments/hos_npe_compressor_l1.yaml`
+- `configs/experiments/hos_npe_compressor_hos.yaml`
+- `configs/experiments/hos_npe_compressor_hos_scat.yaml`
+
+Representative stage-2 NPE configs:
+
+- `configs/experiments/hos_npe_budget_ps.yaml`
+- `configs/experiments/hos_npe_budget_l1.yaml`
+- `configs/experiments/hos_npe_budget_hos.yaml`
+- `configs/experiments/hos_npe_budget_hos_scat.yaml`
+
+Orchestration helpers:
+
+- `scripts/run_hos_npe_representative.py` (submit/monitor stage1 and stage2)
+- `scripts/submit_hos_npe_compressor_job.sh`
+- `scripts/submit_hos_npe_job.sh`
+- `scripts/analyze_hos_npe_results.py`
+
+Example flow:
+
+```bash
+# Stage 1 (compressors)
+python scripts/run_hos_npe_representative.py --mode submit-stage1
+
+# Stage 2 (NPE/FoM) once stage-1 jobs complete
+python scripts/run_hos_npe_representative.py --mode submit-stage2 --manifest jobout/hos_npe_stage1_manifest_<STAMP>.csv
+
+# Aggregate FoM outputs
+python scripts/analyze_hos_npe_results.py --manifest jobout/hos_npe_stage2_manifest_<STAMP>.csv
+```
 
 **Dataset:** [`CosmoStat/neurips-wl-challenge-flat`](https://huggingface.co/datasets/CosmoStat/neurips-wl-challenge-flat)
 
