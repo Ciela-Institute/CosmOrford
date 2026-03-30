@@ -6,6 +6,10 @@ For each budget checkpoint from the compressor budget scan:
 3. Train NPE (conditional MAF) on (summary, theta) pairs
 4. Evaluate FoM at fiducial cosmology
 
+Compressor loading is configurable via `compressor_class_path`, so the same
+runner can be used for CNN-based and analytical-summary compressors as long as
+the model exposes `compress(x) -> (B, context_dim)`.
+
 Usage (Modal):
     .venv/bin/modal run scripts/run_npe_budget_scan.py
 
@@ -24,17 +28,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 from glob import glob
+import importlib
+import re
 
 
 @dataclass
 class NPEConfig:
     budgets: List[int] = field(default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200])
+    compressor_class_path: str = "cosmoford.models_nopatch.RegressionModelNoPatch"
+    checkpoint_metric_name: str = "val_log_prob"
+    checkpoint_mode: str = "min"  # one of ["min", "max"]
+    wandb_entity: str = "cosmostat"
+    wandb_project: str = "neurips-wl-challenge"
+    wandb_budget_tag: str = "budget-scan"
     n_noise_realizations: int = 16
     npe_epochs: int = 500
     npe_lr: float = 1e-3
     npe_batch_size: int = 512
     npe_patience: int = 50
     npe_seeds: int = 5
+    flow_transforms: int = 4
+    flow_hidden_dim: int = 64
     n_posterior_samples: int = 10_000
 
     @classmethod
@@ -45,45 +59,56 @@ class NPEConfig:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
-def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = False) -> str:
-    """Find the best compressor checkpoint for a given budget.
+def _load_class(class_path: str):
+    module_name, class_name = class_path.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)
 
-    Strategy:
-    1. Parse val_mse from Lightning checkpoint filenames, pick lowest
-    2. Fall back to last.ckpt
-    3. Fall back to W&B artifact download (skipped when offline=True)
+
+def find_best_checkpoint_for_metric(
+    budget: int,
+    checkpoints_path: Path,
+    metric_name: str,
+    mode: str,
+    offline: bool = False,
+    wandb_entity: str = "cosmostat",
+    wandb_project: str = "neurips-wl-challenge",
+    wandb_budget_tag: str = "budget-scan",
+) -> str:
+    """Find the best checkpoint for a budget by parsing metric from checkpoint filename.
+
+    Supports configurable metric names and optimization direction for compressor variants.
     """
-    import re
+    if mode not in {"min", "max"}:
+        raise ValueError(f"checkpoint_mode must be 'min' or 'max', got '{mode}'")
 
     checkpoint_dir = checkpoints_path / f"budget-{budget}"
-    checkpoints = str(checkpoint_dir)
-    # print(checkpoints)
-    checkpoints = glob(checkpoints + "/**/*.ckpt", recursive=True)
+    checkpoints = glob(str(checkpoint_dir) + "/**/*.ckpt", recursive=True)
 
-    # for ckpt in checkpoint_dir.glob("*.ckpt"): 
-    #     print(ckpt)
-    # Strategy 1: Parse val_mse from checkpoint filenames
     if checkpoint_dir.exists():
         best_path = None
-        best_logp = float("inf")
+        best_val = float("inf") if mode == "min" else -float("inf")
+        pattern = re.compile(rf"{re.escape(metric_name)}=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
 
         for ckpt in checkpoints:
-            print(ckpt)
-            if ckpt == "last.ckpt":
+            if ckpt.endswith("last.ckpt"):
                 continue
-            # match = re.search(r"val_log_prob=([\d.]+)", ckpt)
-            match = re.search(r"val_log_prob=([-+]?\d*\.?\d+)", ckpt)
-            if match:
-                logp = float(match.group(1))
-                if logp < best_logp:
-                    best_logp = logp
-                    best_path = str(ckpt)
+            match = pattern.search(ckpt)
+            if not match:
+                continue
+            val = float(match.group(1))
+            better = val < best_val if mode == "min" else val > best_val
+            if better:
+                best_val = val
+                best_path = str(ckpt)
 
         if best_path is not None:
-            print(f"Found best checkpoint for budget-{budget}: {best_path} (val_log_prob={best_logp:.6f})")
+            print(
+                f"Found best checkpoint for budget-{budget}: {best_path} "
+                f"({metric_name}={best_val:.6f}, mode={mode})"
+            )
             return best_path
 
-        # Strategy 2: Fall back to last.ckpt
         last_ckpt = checkpoint_dir / "last.ckpt"
         if last_ckpt.exists():
             print(f"Using last.ckpt for budget-{budget}")
@@ -95,14 +120,13 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
             f"and --offline is set (W&B download disabled)."
         )
 
-    # Strategy 3: W&B fallback
     print(f"No local checkpoint for budget-{budget}, trying W&B...")
     import wandb
 
     api = wandb.Api()
     runs = api.runs(
-        "cosmostat/neurips-wl-challenge",
-        filters={"tags": "budget-scan", "display_name": f"budget-{budget}"},
+        f"{wandb_entity}/{wandb_project}",
+        filters={"tags": wandb_budget_tag, "display_name": f"budget-{budget}"},
     )
     for run in runs:
         for art in run.logged_artifacts():
@@ -133,9 +157,9 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     import numpy as np
     import torch
 
-    from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD
+    from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD, SURVEY_MASK
     from cosmoford.dataset import reshape_field_numpy
-    from cosmoford.models_nopatch import RegressionModelNoPatch, build_flow
+    from cosmoford.models_nopatch import build_flow
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*60}")
@@ -147,29 +171,59 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         vol.reload()
 
     # ── 1-3. Load or compute summaries ──
-    cache_dir = summaries_cache_path / f"budget-{budget}"
+    class_tag = cfg.compressor_class_path.split(".")[-1]
+    checkpoints_tag = checkpoints_path.name or "checkpoints"
+    cache_dir = summaries_cache_path / checkpoints_tag / class_tag / f"budget-{budget}"
     cache_file = cache_dir / f"summaries_n{cfg.n_noise_realizations}.pt"
     compressor = None  # loaded lazily for FoM eval
+    compressor_cls = _load_class(cfg.compressor_class_path)
 
-    if cache_file.exists():
+    use_cache = cache_file.exists()
+    if use_cache:
         print(f"Loading cached summaries from {cache_file}")
         cached = torch.load(cache_file, map_location="cpu", weights_only=False)
+        cache_class = cached.get("compressor_class_path")
+        cache_metric = cached.get("checkpoint_metric_name")
+        cache_mode = cached.get("checkpoint_mode")
+        if (
+            cache_class != cfg.compressor_class_path
+            or cache_metric != cfg.checkpoint_metric_name
+            or cache_mode != cfg.checkpoint_mode
+        ):
+            print(
+                "Cached summaries are incompatible with current compressor/metric settings; "
+                "recomputing cache."
+            )
+            use_cache = False
+    if use_cache:
         summaries_tensor = cached["summaries"]
         thetas_tensor = cached["thetas"]
         theta_all = cached["theta_all_raw"]  # unnormalized, for FoM eval
         ckpt_path = cached["compressor_checkpoint"]
-        print(f"Loaded {summaries_tensor.shape[0]} cached pairs (compressor: {ckpt_path})")
-    else:
+        print(
+            f"Loaded {summaries_tensor.shape[0]} cached pairs "
+            f"(compressor: {ckpt_path}, class: {cfg.compressor_class_path})"
+        )
+    if not use_cache:
         print("No cached summaries found, computing from scratch...")
 
         # ── 1. Load frozen compressor ──
-        ckpt_path = find_best_checkpoint(budget, checkpoints_path, offline=offline)
-        compressor = RegressionModelNoPatch.load_from_checkpoint(ckpt_path, map_location=device)
+        ckpt_path = find_best_checkpoint_for_metric(
+            budget,
+            checkpoints_path,
+            metric_name=cfg.checkpoint_metric_name,
+            mode=cfg.checkpoint_mode,
+            offline=offline,
+            wandb_entity=cfg.wandb_entity,
+            wandb_project=cfg.wandb_project,
+            wandb_budget_tag=cfg.wandb_budget_tag,
+        )
+        compressor = compressor_cls.load_from_checkpoint(ckpt_path, map_location=device)
         compressor.eval()
         compressor.to(device)
         for p in compressor.parameters():
             p.requires_grad = False
-        print(f"Loaded compressor from {ckpt_path}")
+        print(f"Loaded compressor from {ckpt_path} ({cfg.compressor_class_path})")
 
         # ── 2. Load holdout dataset ──
         print("Loading holdout dataset...")
@@ -186,8 +240,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         n_maps = len(kappa_all)
         print(f"Holdout: {n_maps} maps")
 
-        # Build mask (same as model uses)
-        from cosmoford import SURVEY_MASK
+        # Build reduced mask (same reshaped geometry as dataloader input)
         mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
         # ── 3. Pre-compute summaries with noise augmentation ──
@@ -211,23 +264,32 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 if (i + 1) % 1000 == 0:
                     print(f"  Processed {i+1}/{n_maps} maps")
 
-        summaries_tensor = torch.cat(all_summaries, dim=0)  # (N*n_noise, 8)
+        summaries_tensor = torch.cat(all_summaries, dim=0)  # (N*n_noise, context_dim)
         thetas_tensor = torch.from_numpy(np.array(all_thetas))  # (N*n_noise, 2)
+        context_dim = int(summaries_tensor.shape[1])
+        print(f"Detected summary context dim: {context_dim}")
 
         # Cache to disk
         cache_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            "summaries": summaries_tensor,
-            "thetas": thetas_tensor,
-            "theta_all_raw": theta_all,
-            "compressor_checkpoint": ckpt_path,
-            "n_noise_realizations": cfg.n_noise_realizations,
-        }, cache_file)
+        torch.save(
+            {
+                "summaries": summaries_tensor,
+                "thetas": thetas_tensor,
+                "theta_all_raw": theta_all,
+                "compressor_checkpoint": ckpt_path,
+                "compressor_class_path": cfg.compressor_class_path,
+                "checkpoint_metric_name": cfg.checkpoint_metric_name,
+                "checkpoint_mode": cfg.checkpoint_mode,
+                "n_noise_realizations": cfg.n_noise_realizations,
+            },
+            cache_file,
+        )
         if vol is not None:
             vol.commit()
         print(f"Cached summaries to {cache_file}")
 
     print(f"Summary dataset: {summaries_tensor.shape[0]} pairs")
+    print(f"Summary context dim: {summaries_tensor.shape[1]}")
 
     # ── 4. Train/val split (90/10) ──
     n_total = summaries_tensor.shape[0]
@@ -255,7 +317,13 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
         torch.manual_seed(seed + 42)
-        flow = build_flow(param_dim=2, context_dim=8).to(device)
+        context_dim = summaries_tensor.shape[1]
+        flow = build_flow(
+            param_dim=2,
+            context_dim=context_dim,
+            n_transforms=cfg.flow_transforms,
+            hidden_dim=cfg.flow_hidden_dim,
+        ).to(device)
         optimizer = torch.optim.Adam(flow.parameters(), lr=cfg.npe_lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.npe_epochs)
 
@@ -309,7 +377,13 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             overall_best_state = best_state
 
     # Restore overall best model
-    flow = build_flow(param_dim=2, context_dim=8).to(device)
+    context_dim = summaries_tensor.shape[1]
+    flow = build_flow(
+        param_dim=2,
+        context_dim=context_dim,
+        n_transforms=cfg.flow_transforms,
+        hidden_dim=cfg.flow_hidden_dim,
+    ).to(device)
     flow.load_state_dict(overall_best_state)
     flow.eval()
     best_val_nll = overall_best_nll
@@ -320,7 +394,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
     # Load compressor for FoM eval if not already loaded (cache path)
     if compressor is None:
-        compressor = RegressionModelNoPatch.load_from_checkpoint(ckpt_path, map_location=device)
+        compressor = compressor_cls.load_from_checkpoint(ckpt_path, map_location=device)
         compressor.eval()
         compressor.to(device)
         for p in compressor.parameters():
@@ -333,7 +407,6 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     kappa_all_fom = np.array(holdout["kappa"])
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
-    from cosmoford import SURVEY_MASK
     mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
     fom_values = []
@@ -379,6 +452,11 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "fom_std": float(fom_std),
         "fom_values": [float(v) for v in fom_values],
         "best_val_nll": float(best_val_nll),
+        "compressor_class_path": cfg.compressor_class_path,
+        "checkpoint_metric_name": cfg.checkpoint_metric_name,
+        "checkpoint_mode": cfg.checkpoint_mode,
+        "flow_transforms": cfg.flow_transforms,
+        "flow_hidden_dim": cfg.flow_hidden_dim,
         "n_noise_realizations": cfg.n_noise_realizations,
         "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": cfg.n_posterior_samples,
@@ -386,7 +464,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
-    vol.commit()
+    if vol is not None:
+        vol.commit()
     print(f"Results saved to {results_dir}")
     print(f"Budget {budget}: DONE (FoM = {fom_mean:.2f} ± {fom_std:.2f})")
     return results
@@ -486,8 +565,6 @@ if __name__ != "__main__":
 if __name__ == "__main__":
     import argparse
 
-    from datasets import load_from_disk
-
     parser = argparse.ArgumentParser(
         description="NPE budget scan — local cluster mode",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -505,14 +582,21 @@ if __name__ == "__main__":
     parser.add_argument("--budgets",
                         help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
                              "(overrides the budgets list in the config file)")
-    parser.add_argument("--offline", help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
-                             "is not found locally", type = bool)
+    parser.add_argument(
+        "--offline",
+        nargs="?",
+        const=True,
+        default=False,
+        type=lambda v: str(v).lower() in {"1", "true", "yes", "y"},
+        help="Disable W&B checkpoint fallback; supports --offline or --offline=true",
+    )
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
     if args.budgets is not None:
         cfg.budgets = [int(b) for b in args.budgets.split(",")]
 
+    from datasets import load_from_disk
     holdout_ds = load_from_disk(args.holdout_path)
 
     for budget in cfg.budgets:

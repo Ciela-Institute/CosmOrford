@@ -5,17 +5,40 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK, NOISE_STD
-from cosmoford.summaries import power_spectrum_batch
+from cosmoford.summaries import (
+  power_spectrum_batch,
+  compute_wavelet_peaks_batch,
+  compute_wavelet_l1_norms_batch,
+  compute_higher_order_statistics_batch,
+  compute_scattering_batch,
+  scattering_n_coefficients,
+)
 from torchvision.models.efficientnet import efficientnet_b0, efficientnet_b2, efficientnet_v2_s, efficientnet_v2_m
 from torchvision.models.resnet import resnet18, ResNet18_Weights
-from peft import LoraConfig, get_peft_model
-from nflows.flows import Flow
-from nflows.distributions import StandardNormal
-from nflows.transforms import CompositeTransform, MaskedAffineAutoregressiveTransform, RandomPermutation
+try:
+  from peft import LoraConfig, get_peft_model
+except ImportError:  # Optional dependency for LoRA workflows
+  LoraConfig = None
+  get_peft_model = None
+try:
+  from nflows.flows import Flow
+  from nflows.distributions import StandardNormal
+  from nflows.transforms import CompositeTransform, MaskedAffineAutoregressiveTransform, RandomPermutation
+except ImportError:  # Optional dependency unless flow training is enabled
+  Flow = None
+  StandardNormal = None
+  CompositeTransform = None
+  MaskedAffineAutoregressiveTransform = None
+  RandomPermutation = None
 
 
 def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64):
   """Build a small conditional MAF: p(params | summaries)."""
+  if Flow is None or StandardNormal is None:
+    raise ImportError(
+      "build_flow requires the optional 'nflows' dependency. "
+      "Install nflows to enable posterior-flow training."
+    )
   transforms = []
   for _ in range(n_transforms):
     transforms.append(RandomPermutation(features=param_dim))
@@ -28,6 +51,373 @@ def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64):
     transform=CompositeTransform(transforms),
     distribution=StandardNormal([param_dim]),
   )
+
+
+def _inverse_reshape_field(kappa_reduced: torch.Tensor, fill_value: float = 0.0) -> torch.Tensor:
+  """Reconstruct full (1424, 176) maps from reduced (1834, 88) representation."""
+  bsz, _, _ = kappa_reduced.shape
+  part1 = kappa_reduced[:, :1424, :]
+  part2 = kappa_reduced[:, 1424:, :]
+  kappa_full = torch.full(
+    (bsz, 1424, 176),
+    fill_value,
+    dtype=kappa_reduced.dtype,
+    device=kappa_reduced.device,
+  )
+  kappa_full[:, :, :88] = part1
+  kappa_full[:, 620:1030, 88:] = part2
+  return kappa_full
+
+
+def _stats_input_dim(
+  use_ps: bool,
+  use_hos: bool,
+  hos_l1_only: bool,
+  hos_peaks_only: bool,
+  hos_n_scales: int,
+  hos_n_bins: int,
+  hos_l1_nbins: int,
+  use_scattering: bool,
+  scattering_J: int,
+  scattering_L: int,
+  scattering_feature_pooling: str,
+) -> int:
+  dim = 0
+  if use_ps:
+    dim += 10
+  if use_hos:
+    if hos_l1_only:
+      dim += hos_n_scales * hos_l1_nbins
+    elif hos_peaks_only:
+      dim += hos_n_scales * hos_n_bins
+    else:
+      dim += hos_n_scales * (hos_n_bins + hos_l1_nbins)
+  if use_scattering:
+    dim += scattering_n_coefficients(
+      scattering_J,
+      scattering_L,
+      feature_pooling=scattering_feature_pooling,
+    )
+  return dim
+
+
+class StatsCompressorNoPatch(L.LightningModule):
+
+  def __init__(
+    self,
+    summary_dim: int = 8,
+    summary_hidden_dim: int = 512,
+    summary_n_hidden: int = 3,
+    summary_dropout_rate: float = 0.1,
+    use_ps: bool = False,
+    use_hos: bool = True,
+    hos_l1_only: bool = False,
+    hos_peaks_only: bool = False,
+    hos_n_scales: int = 4,
+    hos_n_bins: int = 51,
+    hos_l1_nbins: int = 80,
+    hos_min_snr: float = -3.0,
+    hos_max_snr: float = 7.0,
+    hos_l1_min_snr: float = -7.0,
+    hos_l1_max_snr: float = 7.0,
+    use_scattering: bool = False,
+    scattering_J: int = 4,
+    scattering_L: int = 8,
+    scattering_normalization: str = "log1p_zscore",
+    scattering_feature_pooling: str = "mean",
+    scattering_mask_pooling: str = "soft",
+    scattering_geometry: str = "reduced",
+    augment_flip: bool = True,
+    augment_shift: bool = True,
+    warmup_steps: int = 500,
+    max_lr: float = 1.0e-3,
+    decay_rate: float = 0.85,
+    decay_every_epochs: int = 1,
+    loss_type: str = "log_prob",
+    use_flow: bool = False,
+    flow_transforms: int = 4,
+    flow_hidden_dim: int = 64,
+    lr_schedule: str = "step",
+    total_steps: int = 0,
+    n_val_noise: int = 1,
+  ):
+    super().__init__()
+    self.save_hyperparameters()
+
+    if loss_type not in ["log_prob", "score"]:
+      raise ValueError(f"loss_type must be 'log_prob' or 'score', got '{loss_type}'")
+    if scattering_normalization not in ["log1p_zscore", "zscore", "none"]:
+      raise ValueError(
+        "scattering_normalization must be one of ['log1p_zscore', 'zscore', 'none'], "
+        f"got '{scattering_normalization}'"
+      )
+    if scattering_mask_pooling not in ["soft", "hard"]:
+      raise ValueError(
+        "scattering_mask_pooling must be one of ['soft', 'hard'], "
+        f"got '{scattering_mask_pooling}'"
+      )
+    if scattering_feature_pooling not in ["mean", "mean_std"]:
+      raise ValueError(
+        "scattering_feature_pooling must be one of ['mean', 'mean_std'], "
+        f"got '{scattering_feature_pooling}'"
+      )
+    if scattering_geometry not in ["reduced", "full"]:
+      raise ValueError(
+        "scattering_geometry must be one of ['reduced', 'full'], "
+        f"got '{scattering_geometry}'"
+      )
+    if hos_l1_only and hos_peaks_only:
+      raise ValueError("hos_l1_only and hos_peaks_only cannot both be True.")
+    if use_flow and Flow is None:
+      raise ImportError(
+        "use_flow=True requires the optional 'nflows' dependency. "
+        "Install nflows or set use_flow=False."
+      )
+
+    self.mask_reduced = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
+    self.mask_full = SURVEY_MASK
+    self.mask = self.mask_reduced
+
+    input_dim = _stats_input_dim(
+      use_ps=use_ps,
+      use_hos=use_hos,
+      hos_l1_only=hos_l1_only,
+      hos_peaks_only=hos_peaks_only,
+      hos_n_scales=hos_n_scales,
+      hos_n_bins=hos_n_bins,
+      hos_l1_nbins=hos_l1_nbins,
+      use_scattering=use_scattering,
+      scattering_J=scattering_J,
+      scattering_L=scattering_L,
+      scattering_feature_pooling=scattering_feature_pooling,
+    )
+    if input_dim == 0:
+      raise ValueError("At least one of use_ps, use_hos, or use_scattering must be True.")
+
+    layers = [
+      nn.Linear(input_dim, summary_hidden_dim),
+      nn.GELU(),
+    ]
+    for _ in range(max(summary_n_hidden - 1, 0)):
+      layers.extend([
+        nn.Linear(summary_hidden_dim, summary_hidden_dim),
+        nn.GELU(),
+        nn.Dropout(summary_dropout_rate),
+      ])
+    layers.append(nn.Linear(summary_hidden_dim, summary_dim))
+    self.compressor = nn.Sequential(*layers)
+
+    if use_flow:
+      self.flow = build_flow(
+        param_dim=2,
+        context_dim=summary_dim,
+        n_transforms=flow_transforms,
+        hidden_dim=flow_hidden_dim,
+      )
+    self.head = nn.Sequential(
+      nn.GELU(),
+      nn.Linear(summary_dim, summary_dim * 4),
+      nn.GELU(),
+      nn.Linear(summary_dim * 4, 2 * 2),
+    )
+
+  def _compute_stats(self, x):
+    parts = []
+    mask_reduced_t = torch.tensor(self.mask_reduced, device=x.device, dtype=x.dtype)
+    mask_full_t = torch.tensor(self.mask_full, device=x.device, dtype=x.dtype)
+    with torch.no_grad():
+      if self.hparams.use_ps:
+        _, ps_features = power_spectrum_batch(x)
+        parts.append(ps_features)
+
+      if self.hparams.use_hos:
+        if self.hparams.hos_l1_only:
+          hos_features = compute_wavelet_l1_norms_batch(
+            x,
+            noise_std=NOISE_STD,
+            mask=mask_reduced_t,
+            n_scales=self.hparams.hos_n_scales,
+            pixel_arcmin=2.0,
+            l1_nbins=self.hparams.hos_l1_nbins,
+            l1_min_snr=self.hparams.hos_l1_min_snr,
+            l1_max_snr=self.hparams.hos_l1_max_snr,
+            normalize=True,
+          )
+        elif self.hparams.hos_peaks_only:
+          hos_features = compute_wavelet_peaks_batch(
+            x,
+            noise_std=NOISE_STD,
+            mask=mask_reduced_t,
+            n_scales=self.hparams.hos_n_scales,
+            pixel_arcmin=2.0,
+            n_bins=self.hparams.hos_n_bins,
+            min_snr=self.hparams.hos_min_snr,
+            max_snr=self.hparams.hos_max_snr,
+            normalize=True,
+          )
+        else:
+          hos_features = compute_higher_order_statistics_batch(
+            x,
+            noise_std=NOISE_STD,
+            mask=mask_reduced_t,
+            n_scales=self.hparams.hos_n_scales,
+            pixel_arcmin=2.0,
+            n_bins=self.hparams.hos_n_bins,
+            l1_nbins=self.hparams.hos_l1_nbins,
+            min_snr=self.hparams.hos_min_snr,
+            max_snr=self.hparams.hos_max_snr,
+            l1_min_snr=self.hparams.hos_l1_min_snr,
+            l1_max_snr=self.hparams.hos_l1_max_snr,
+            normalize=True,
+          )
+        parts.append(hos_features)
+
+      if self.hparams.use_scattering:
+        if self.hparams.scattering_geometry == "full":
+          scat_maps = _inverse_reshape_field(x)
+          scat_mask = mask_full_t
+        else:
+          scat_maps = x
+          scat_mask = mask_reduced_t
+        scat_features = compute_scattering_batch(
+          scat_maps,
+          J=self.hparams.scattering_J,
+          L=self.hparams.scattering_L,
+          normalize=True,
+          normalization=self.hparams.scattering_normalization,
+          mask=scat_mask,
+          mask_pooling=self.hparams.scattering_mask_pooling,
+          feature_pooling=self.hparams.scattering_feature_pooling,
+        )
+        parts.append(scat_features)
+
+    return torch.cat(parts, dim=1)
+
+  def forward(self, x):
+    summaries = self.compress(x)
+    out = self.head(summaries)
+    return out[..., :2], F.softplus(out[..., 2:]) + 0.001, summaries
+
+  def compress(self, x):
+    return self.compressor(self._compute_stats(x))
+
+  def training_step(self, batch, batch_idx):
+    x, y = batch
+
+    noise = torch.randn_like(x) * NOISE_STD
+    x = x + noise
+    x = x * torch.tensor(self.mask, device=x.device).unsqueeze(0)
+
+    batch_size = x.size(0)
+    if self.hparams.augment_flip:
+      flip_lr = torch.rand(batch_size, device=x.device) < 0.5
+      x[flip_lr] = torch.flip(x[flip_lr], dims=[1])
+      flip_ud = torch.rand(batch_size, device=x.device) < 0.5
+      x[flip_ud] = torch.flip(x[flip_ud], dims=[2])
+
+    if self.hparams.augment_shift:
+      shift_x = torch.randint(low=0, high=x.size(1), size=(batch_size,), device=x.device)
+      x = torch.stack([torch.roll(x[i], shifts=(shift_x[i].item(),), dims=(0,)) for i in range(batch_size)])
+      shift_y = torch.randint(low=0, high=x.size(2), size=(batch_size,), device=x.device)
+      x = torch.stack([torch.roll(x[i], shifts=(shift_y[i].item(),), dims=(1,)) for i in range(batch_size)])
+
+    mean, std, summaries = self(x)
+    if self.hparams.use_flow:
+      loss = -self.flow.log_prob(y, context=summaries).mean()
+    elif self.hparams.loss_type == "log_prob":
+      loss = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+    else:
+      mean = mean * torch.tensor(THETA_STD[:2], device=mean.device) + torch.tensor(THETA_MEAN[:2], device=mean.device)
+      std = std * torch.tensor(THETA_STD[:2], device=std.device)
+      y = y[:, :2] * torch.tensor(THETA_STD[:2], device=y.device) + torch.tensor(THETA_MEAN[:2], device=y.device)
+      sq_error = (y - mean) ** 2
+      score = -torch.sum(sq_error / std**2 + torch.log(std**2) + 1000.0 * sq_error, dim=1)
+      loss = -torch.mean(score)
+
+    self.log("train_loss", loss)
+    return loss
+
+  def validation_step(self, batch, batch_idx):
+    x, y = batch
+    mask = torch.tensor(self.mask, device=x.device).unsqueeze(0)
+
+    total_mean = 0.0
+    total_std = 0.0
+    total_summaries = 0.0
+    for _ in range(self.hparams.n_val_noise):
+      x_noisy = (x + torch.randn_like(x) * NOISE_STD) * mask
+      m, s, summ = self(x_noisy)
+      total_mean += m
+      total_std += s
+      total_summaries += summ
+    mean = total_mean / self.hparams.n_val_noise
+    std = total_std / self.hparams.n_val_noise
+    summaries = total_summaries / self.hparams.n_val_noise
+
+    if self.hparams.use_flow:
+      nll = -self.flow.log_prob(y, context=summaries).mean()
+      self.log("val_nll", nll, prog_bar=True)
+      return nll
+
+    loss_val = -torch.distributions.Normal(loc=mean, scale=std).log_prob(y).mean()
+    self.log("val_log_prob", loss_val, prog_bar=True)
+
+    mean = mean * torch.tensor(THETA_STD[:2], device=mean.device) + torch.tensor(THETA_MEAN[:2], device=mean.device)
+    std = std * torch.tensor(THETA_STD[:2], device=std.device)
+    y = y[:, :2] * torch.tensor(THETA_STD[:2], device=y.device) + torch.tensor(THETA_MEAN[:2], device=y.device)
+
+    sq_error = (y - mean) ** 2
+    scale_factor = 1000.0
+    score = -torch.sum(sq_error / std**2 + torch.log(std**2) + scale_factor * sq_error, dim=1)
+    score = torch.mean(score)
+
+    mse = F.mse_loss(mean, y)
+    self.log("val_score", score, prog_bar=True)
+    self.log("val_mse", mse, prog_bar=True)
+    return score
+
+  def configure_optimizers(self):
+    optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.max_lr, weight_decay=1e-5)
+    if self.hparams.total_steps > 0:
+      total_steps = self.hparams.total_steps
+    else:
+      total_steps = int(self.trainer.estimated_stepping_batches)
+    warmup_steps = self.hparams.warmup_steps
+
+    warmup = torch.optim.lr_scheduler.LinearLR(
+      optimizer,
+      start_factor=1e-10,
+      end_factor=1.0,
+      total_iters=warmup_steps,
+    )
+
+    if self.hparams.lr_schedule == "cosine":
+      main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps - warmup_steps
+      )
+    else:
+      steps_per_epoch = total_steps // self.trainer.max_epochs
+      step_size_in_steps = self.hparams.decay_every_epochs * steps_per_epoch
+      main_scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=step_size_in_steps,
+        gamma=self.hparams.decay_rate,
+      )
+
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+      optimizer,
+      schedulers=[warmup, main_scheduler],
+      milestones=[warmup_steps],
+    )
+
+    return {
+      "optimizer": optimizer,
+      "lr_scheduler": {
+        "scheduler": scheduler,
+        "interval": "step",
+        "frequency": 1,
+      },
+    }
 
 
 class RegressionModelNoPatch(L.LightningModule):
@@ -82,6 +472,16 @@ class RegressionModelNoPatch(L.LightningModule):
     self._lora_alpha = lora_alpha
     self._lora_dropout = lora_dropout
     self._lora_target_modules = lora_target_modules
+    if use_flow and Flow is None:
+      raise ImportError(
+        "use_flow=True requires the optional 'nflows' dependency. "
+        "Install nflows or set use_flow=False."
+      )
+    if use_peft and (LoraConfig is None or get_peft_model is None):
+      raise ImportError(
+        "use_peft=True requires the optional 'peft' dependency. "
+        "Install peft or disable use_peft."
+      )
 
     # Apply PEFT/LoRA if enabled (but only if we're not loading from a pretrained checkpoint)
     # If pretrained_checkpoint_path is provided, we'll apply LoRA after loading the weights
@@ -244,6 +644,11 @@ class RegressionModelNoPatch(L.LightningModule):
 
     # Apply LoRA after loading pretrained weights if use_peft is enabled
     if self._use_peft:
+      if LoraConfig is None or get_peft_model is None:
+        raise ImportError(
+          "use_peft=True requires the optional 'peft' dependency. "
+          "Install peft or disable use_peft."
+        )
       print("Applying LoRA to pretrained model...")
       lora_target_modules = self._lora_target_modules
 
