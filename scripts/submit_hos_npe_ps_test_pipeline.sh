@@ -64,6 +64,9 @@ NPE_RESULTS_PATH="${NPE_RESULTS_PATH:-$HOME/experiments/npe_results/$RUN_NAME}"
 SUMMARIES_CACHE_PATH="${SUMMARIES_CACHE_PATH:-$HOME/experiments/summaries_cache/$RUN_NAME}"
 
 mkdir -p "$CHECKPOINT_DIR" "$NPE_RESULTS_PATH" "$SUMMARIES_CACHE_PATH"
+STAGE1_MARKER="$CHECKPOINT_DIR/.stage1_start_marker"
+rm -f "$STAGE1_MARKER"
+touch "$STAGE1_MARKER"
 
 echo ""
 echo ">>> Stage 1/2: training PS compressor"
@@ -74,8 +77,35 @@ python -m cosmoford.trainer fit \
   --data.dataset_mode=train \
   --trainer.devices=1 \
   --trainer.default_root_dir="$CHECKPOINT_DIR" \
+  --trainer.logger.init_args.save_dir="$CHECKPOINT_DIR" \
   --trainer.enable_progress_bar=false \
   "--trainer.callbacks+={class_path: cosmoford.trainer.EpochProgressPrinter}"
+
+echo ""
+echo ">>> Collecting stage-1 checkpoints"
+mapfile -t CKPTS < <(find "$CHECKPOINT_DIR" -type f -name '*.ckpt' | sort)
+if [ "${#CKPTS[@]}" -eq 0 ]; then
+  echo "No checkpoints found under $CHECKPOINT_DIR; searching fallback logger dirs..."
+  mapfile -t FALLBACK_CKPTS < <(
+    {
+      find "$HOME/software/CosmOrford/neurips-wl-challenge" -type f -name '*.ckpt' -newer "$STAGE1_MARKER" 2>/dev/null || true
+      find "$HOME/software/CosmOrford/lightning_logs" -type f -name '*.ckpt' -newer "$STAGE1_MARKER" 2>/dev/null || true
+    } | sort -u
+  )
+  if [ "${#FALLBACK_CKPTS[@]}" -gt 0 ]; then
+    mkdir -p "$CHECKPOINT_DIR/stage1_ckpts"
+    for src in "${FALLBACK_CKPTS[@]}"; do
+      cp -f "$src" "$CHECKPOINT_DIR/stage1_ckpts/"
+    done
+    mapfile -t CKPTS < <(find "$CHECKPOINT_DIR" -type f -name '*.ckpt' | sort)
+  fi
+fi
+if [ "${#CKPTS[@]}" -eq 0 ]; then
+  echo "ERROR: Stage-1 completed but no checkpoint files were found for run $RUN_NAME" >&2
+  exit 2
+fi
+echo "Found ${#CKPTS[@]} checkpoint file(s)."
+printf '  %s\n' "${CKPTS[@]:0:6}"
 
 echo ""
 echo ">>> Stage 2/2: NPE + FoM + posterior samples/plots"
