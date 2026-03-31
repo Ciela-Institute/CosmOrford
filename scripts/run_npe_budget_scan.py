@@ -42,6 +42,7 @@ class NPEConfig:
     wandb_project: str = "neurips-wl-challenge"
     wandb_budget_tag: str = "budget-scan"
     n_noise_realizations: int = 16
+    n_holdout_train_maps: int = 0  # 0 means "use all"
     npe_epochs: int = 500
     npe_lr: float = 1e-3
     npe_batch_size: int = 512
@@ -320,8 +321,15 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         theta_norm = (theta_all[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]
         theta_norm = theta_norm.astype(np.float32)
 
+        if cfg.n_holdout_train_maps > 0:
+            kappa_all = kappa_all[:cfg.n_holdout_train_maps]
+            theta_all = theta_all[:cfg.n_holdout_train_maps]
+
         n_maps = len(kappa_all)
-        print(f"Holdout: {n_maps} maps")
+        print(
+            f"Holdout train maps used: {n_maps}"
+            + (f" (requested={cfg.n_holdout_train_maps})" if cfg.n_holdout_train_maps > 0 else "")
+        )
 
         # Build reduced mask (same reshaped geometry as dataloader input)
         mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
@@ -582,6 +590,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "flow_transforms": cfg.flow_transforms,
         "flow_hidden_dim": cfg.flow_hidden_dim,
         "n_noise_realizations": cfg.n_noise_realizations,
+        "n_holdout_train_maps_used": int(n_maps),
+        "n_holdout_train_maps_requested": int(cfg.n_holdout_train_maps),
         "n_fiducial_maps": len(kappa_all_fom),
         "n_fiducial_maps_requested": int(cfg.n_fiducial_maps),
         "n_posterior_samples": cfg.n_posterior_samples,

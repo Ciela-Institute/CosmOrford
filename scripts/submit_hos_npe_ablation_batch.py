@@ -220,6 +220,7 @@ def _build_npe_cfg(regime_id: str, budget: int, fiducial_maps: int):
         "wandb_project": "neurips-wl-challenge",
         "wandb_budget_tag": f"hos-npe-{regime_id}",
         "n_noise_realizations": 16,
+        "n_holdout_train_maps": 0,
         "npe_epochs": 500,
         "npe_lr": 1.0e-3,
         "npe_batch_size": 512,
@@ -235,10 +236,18 @@ def _build_npe_cfg(regime_id: str, budget: int, fiducial_maps: int):
     }
 
 
-def _submit_pipeline_job(compressor_cfg: pathlib.Path, npe_cfg: pathlib.Path, run_name: str, budget: int, seed: int):
+def _submit_pipeline_job(
+    compressor_cfg: pathlib.Path,
+    npe_cfg: pathlib.Path,
+    run_name: str,
+    budget: int,
+    seed: int,
+    sbatch_overrides: List[str] | None = None,
+):
     cmd = [
         "sbatch",
         "--export=ALL",
+        *(sbatch_overrides or []),
         "scripts/submit_hos_npe_pipeline.sh",
         str(compressor_cfg),
         str(npe_cfg),
@@ -259,6 +268,10 @@ def main():
     parser.add_argument("--budget", type=int, default=20200)
     parser.add_argument("--seeds", default="42,43")
     parser.add_argument("--fiducial-maps", type=int, default=10)
+    parser.add_argument("--smoke", action="store_true", help="Generate/submit fast smoke-test jobs")
+    parser.add_argument("--smoke-time", default="01:00:00")
+    parser.add_argument("--smoke-mem", default="48G")
+    parser.add_argument("--smoke-cpus", type=int, default=8)
     parser.add_argument("--manifest-out", default=None)
     parser.add_argument("--regimes", nargs="*", default=None, help="Optional subset of regime IDs")
     parser.add_argument("--dry-run", action="store_true")
@@ -283,21 +296,61 @@ def main():
         if not source_cfg.exists():
             raise FileNotFoundError(f"Missing source config for regime {regime_id}: {source_cfg}")
 
-        compressor_cfg = generated_dir / f"{regime_id}_compressor.yaml"
-        npe_cfg = generated_dir / f"{regime_id}_npe.yaml"
-        _write_yaml(compressor_cfg, _build_compressor_cfg(source_cfg, regime_id, args.budget))
-        _write_yaml(npe_cfg, _build_npe_cfg(regime_id, args.budget, args.fiducial_maps))
+        if args.smoke:
+            compressor_cfg = generated_dir / f"{regime_id}_smoke_compressor.yaml"
+            npe_cfg = generated_dir / f"{regime_id}_smoke_npe.yaml"
+        else:
+            compressor_cfg = generated_dir / f"{regime_id}_compressor.yaml"
+            npe_cfg = generated_dir / f"{regime_id}_npe.yaml"
+        compressor_payload = _build_compressor_cfg(source_cfg, regime_id, args.budget)
+        npe_payload = _build_npe_cfg(regime_id, args.budget, args.fiducial_maps)
+        if args.smoke:
+            compressor_payload["data"]["init_args"]["batch_size"] = 128
+            compressor_payload["trainer"]["max_epochs"] = 4
+            npe_payload.update(
+                {
+                    "wandb_budget_tag": f"hos-npe-{regime_id}-smoke",
+                    "n_noise_realizations": 2,
+                    "n_holdout_train_maps": 128,
+                    "npe_epochs": 60,
+                    "npe_patience": 10,
+                    "npe_seeds": 1,
+                    "n_posterior_samples": 2000,
+                    "posterior_plot_bins": 50,
+                }
+            )
+        _write_yaml(compressor_cfg, compressor_payload)
+        _write_yaml(npe_cfg, npe_payload)
 
         for seed in seeds:
-            run_name = f"hos_npe_{regime_id}_s{seed}"
+            run_suffix = "_smoke" if args.smoke else ""
+            run_name = f"hos_npe_{regime_id}_s{seed}{run_suffix}"
+            sbatch_overrides = []
+            if args.smoke:
+                sbatch_overrides = [
+                    f"--time={args.smoke_time}",
+                    f"--mem={args.smoke_mem}",
+                    f"--cpus-per-task={args.smoke_cpus}",
+                    "--job-name=hos_npe_smoke",
+                ]
             if args.dry_run:
                 job_id = ""
+                override_str = " ".join(sbatch_overrides)
+                if override_str:
+                    override_str = " " + override_str
                 submit_out = (
-                    f"sbatch --export=ALL scripts/submit_hos_npe_pipeline.sh "
+                    f"sbatch --export=ALL{override_str} scripts/submit_hos_npe_pipeline.sh "
                     f"{compressor_cfg} {npe_cfg} {run_name} {args.budget} {seed}"
                 )
             else:
-                job_id, submit_out = _submit_pipeline_job(compressor_cfg, npe_cfg, run_name, args.budget, seed)
+                job_id, submit_out = _submit_pipeline_job(
+                    compressor_cfg,
+                    npe_cfg,
+                    run_name,
+                    args.budget,
+                    seed,
+                    sbatch_overrides=sbatch_overrides,
+                )
             rows.append(
                 {
                     "timestamp_utc": stamp,
@@ -309,6 +362,7 @@ def main():
                     "npe_config": str(npe_cfg.relative_to(root)),
                     "seed": seed,
                     "budget": args.budget,
+                    "smoke": args.smoke,
                     "run_name": run_name,
                     "job_id": job_id,
                     "submit_output": submit_out,
@@ -329,6 +383,7 @@ def main():
                 "npe_config",
                 "seed",
                 "budget",
+                "smoke",
                 "run_name",
                 "job_id",
                 "submit_output",
