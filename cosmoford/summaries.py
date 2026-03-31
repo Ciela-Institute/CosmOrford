@@ -125,7 +125,7 @@ def power_spectrum_batch(x, pixsize=2. / 60 / 180 * np.pi, kedge=np.logspace(2, 
         # maps causes +1 to +4 sigma bias at high-k (noise-dominated) bins.
         log_power = torch.log10(power + 1e-30)
         mean = log_power.mean(dim=0, keepdim=True)
-        std = log_power.std(dim=0, keepdim=True) + 1e-8
+        std = log_power.std(dim=0, keepdim=True, unbiased=False) + 1e-8
         log_power = (log_power - mean) / std
         power = log_power
 
@@ -212,7 +212,7 @@ def compute_wavelet_peaks_batch(x, noise_std, mask=None, n_scales=5,
     if normalize:
         all_features = torch.log10(all_features + 1.0)
         mean = all_features.mean(dim=0, keepdim=True)
-        std = all_features.std(dim=0, keepdim=True) + 1e-8
+        std = all_features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
         all_features = (all_features - mean) / std
 
     return all_features.to(dtype=dtype)
@@ -298,7 +298,7 @@ def compute_wavelet_l1_norms_batch(x, noise_std, mask=None, n_scales=5,
     if normalize:
         all_features = torch.log10(all_features + 1.0)
         mean = all_features.mean(dim=0, keepdim=True)
-        std = all_features.std(dim=0, keepdim=True) + 1e-8
+        std = all_features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
         all_features = (all_features - mean) / std
 
     return all_features.to(dtype=dtype)
@@ -415,7 +415,7 @@ def compute_higher_order_statistics_batch(x, noise_std, mask=None, n_scales=5,
     if normalize:
         all_features = torch.log10(all_features + 1.0)
         mean = all_features.mean(dim=0, keepdim=True)
-        std = all_features.std(dim=0, keepdim=True) + 1e-8
+        std = all_features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
         all_features = (all_features - mean) / std
 
     return all_features.to(dtype=dtype)
@@ -553,7 +553,7 @@ def compute_scattering_batch(
     if mask is None:
         mean = Sx.mean(dim=(-2, -1)).squeeze(1)  # (B, K)
         if feature_pooling == "mean_std":
-            std = Sx.std(dim=(-2, -1)).squeeze(1)
+            std = Sx.std(dim=(-2, -1), unbiased=False).squeeze(1)
             features = torch.cat([mean, std], dim=1)
         else:
             features = mean
@@ -600,7 +600,7 @@ def compute_scattering_batch(
         if normalization == "log1p_zscore":
             features = torch.log1p(features)
         mean = features.mean(dim=0, keepdim=True)
-        std = features.std(dim=0, keepdim=True) + 1e-8
+        std = features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
         features = (features - mean) / std
 
     if not torch.isfinite(features).all():

@@ -33,7 +33,7 @@ def sacct_state(job_id: str) -> str:
 def submit_row(row):
     cmd = [
         "sbatch",
-        "--export=ALL",
+        "--export=ALL,CLEAN_PREVIOUS_RUN=1",
         "scripts/submit_hos_npe_pipeline.sh",
         row["compressor_config"],
         row["npe_config"],
@@ -54,6 +54,11 @@ def main():
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--out", default=None, help="Output manifest for resubmitted jobs")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--include-running",
+        action="store_true",
+        help="Also cancel+resubmit currently RUNNING jobs from the manifest.",
+    )
     args = parser.parse_args()
 
     in_manifest = pathlib.Path(args.manifest)
@@ -65,12 +70,17 @@ def main():
     for row in rows:
         job_id = row.get("job_id", "")
         state = sacct_state(job_id) if job_id else "NOJOB"
-        if not state.startswith(FAIL_PREFIXES):
+        should_rerun = state.startswith(FAIL_PREFIXES) or (args.include_running and state.startswith("RUNNING"))
+        if not should_rerun:
             continue
+        if args.include_running and state.startswith("RUNNING") and not args.dry_run:
+            cancel_cmd = ["scancel", job_id]
+            subprocess.run(cancel_cmd, check=True, capture_output=True, text=True)
         if args.dry_run:
             new_job_id = ""
+            export_env = "ALL,CLEAN_PREVIOUS_RUN=1"
             submit_output = (
-                f"sbatch --export=ALL scripts/submit_hos_npe_pipeline.sh "
+                f"sbatch --export={export_env} scripts/submit_hos_npe_pipeline.sh "
                 f"{row['compressor_config']} {row['npe_config']} {row['run_name']} {row['budget']} {row['seed']}"
             )
         else:

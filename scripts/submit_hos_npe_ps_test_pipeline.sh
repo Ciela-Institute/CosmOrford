@@ -52,6 +52,18 @@ module load gcc arrow/23.0.1
 module load cuda/12.6
 
 source "$HOME/wl-challenge-env/bin/activate"
+
+python - <<'PY'
+import importlib.util
+import sys
+if importlib.util.find_spec("nflows") is None:
+    sys.stderr.write(
+        "ERROR: 'nflows' is not installed in $HOME/wl-challenge-env. "
+        "Install it once with: source $HOME/wl-challenge-env/bin/activate && pip install nflows\n"
+    )
+    raise SystemExit(3)
+PY
+
 cd "$HOME/software/CosmOrford"
 mkdir -p jobout
 
@@ -63,6 +75,11 @@ CHECKPOINT_DIR="$CHECKPOINTS_BASE/budget-$BUDGET"
 NPE_RESULTS_PATH="${NPE_RESULTS_PATH:-$HOME/experiments/npe_results/$RUN_NAME}"
 SUMMARIES_CACHE_PATH="${SUMMARIES_CACHE_PATH:-$HOME/experiments/summaries_cache/$RUN_NAME}"
 
+if [ "${CLEAN_PREVIOUS_RUN:-1}" = "1" ]; then
+  rm -rf "$CHECKPOINT_DIR"
+  rm -rf "$NPE_RESULTS_PATH/budget-$BUDGET"
+  rm -rf "$SUMMARIES_CACHE_PATH"
+fi
 mkdir -p "$CHECKPOINT_DIR" "$NPE_RESULTS_PATH" "$SUMMARIES_CACHE_PATH"
 STAGE1_MARKER="$CHECKPOINT_DIR/.stage1_start_marker"
 rm -f "$STAGE1_MARKER"
