@@ -30,6 +30,32 @@ A Masked Autoregressive Flow (MAF) is trained on (summary, θ) pairs drawn from 
 **Step 3 — Figure of Merit (FoM).**
 Posterior samples are drawn for maps from the `fiducial` split of the holdout dataset (Ω_m = 0.29, S_8 = 0.81). The FoM = 1 / sqrt(det Cov(Ω_m, S_8)) measures how tightly the posterior constrains the parameters.
 
+Contour plots are now generated with **getdist** (instead of the previous histogram-based contouring), both in live runs and via a backfill script for already-completed runs.
+
+---
+
+## 📊 W&B pages and syncing (compression vs inference)
+
+HOS-NPE now logs to two separate W&B projects (pages):
+
+- Compression page/project: `neurips-wl-challenge-hos-compression`
+- Inference/NPE page/project: `neurips-wl-challenge-hos-npe`
+
+Stage-1 compressor runs are logged by Lightning `WandbLogger` to the compression project.  
+Stage-2 NPE runs are logged directly in `scripts/run_npe_budget_scan.py` to the inference project (including FoM metrics and posterior images).
+
+To sync offline runs after jobs finish:
+
+```bash
+python scripts/sync_hos_npe_wandb.py --sync-inference-backfill
+```
+
+To backfill already-completed runs and regenerate contour plots with getdist:
+
+```bash
+python scripts/replot_posteriors_with_getdist.py --overwrite
+```
+
 **Scripts:**
 
 | Script | Description |
@@ -166,7 +192,7 @@ python scripts/hf_emulated_dataset.py
 pip install -e .
 ```
 
-Requires Python ≥ 3.8. Key dependencies: `torch`, `lightning`, `diffusers`, `torchdyn`, `nflows`, `datasets`, `wandb`.
+Requires Python ≥ 3.8. Key dependencies: `torch`, `lightning`, `diffusers`, `torchdyn`, `nflows`, `datasets`, `wandb`, `getdist`.
 
 ---
 

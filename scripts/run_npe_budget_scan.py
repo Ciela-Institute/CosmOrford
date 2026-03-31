@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import List
 from glob import glob
 import importlib
+import os
 import re
 
 
@@ -39,8 +40,13 @@ class NPEConfig:
     checkpoint_metric_name: str = "val_log_prob"
     checkpoint_mode: str = "min"  # one of ["min", "max"]
     wandb_entity: str = "cosmostat"
-    wandb_project: str = "neurips-wl-challenge"
+    wandb_project: str = "neurips-wl-challenge-hos-compression"
     wandb_budget_tag: str = "budget-scan"
+    log_npe_to_wandb: bool = True
+    wandb_npe_entity: str = "cosmostat"
+    wandb_npe_project: str = "neurips-wl-challenge-hos-npe"
+    wandb_npe_tags: List[str] = field(default_factory=lambda: ["hos-npe", "inference"])
+    wandb_npe_log_images: bool = True
     n_noise_realizations: int = 16
     n_holdout_train_maps: int = 0  # 0 means "use all"
     npe_epochs: int = 500
@@ -55,6 +61,7 @@ class NPEConfig:
     save_posterior_samples: bool = True
     save_posterior_plots: bool = True
     posterior_plot_bins: int = 80
+    use_getdist_contours: bool = True
 
     @classmethod
     def from_yaml(cls, path: str) -> "NPEConfig":
@@ -182,7 +189,38 @@ def _save_posterior_plot(samples_phys, output_path: Path, bins: int, title: str)
     plt.close(fig)
 
 
-def _save_posterior_contour_plot(samples_phys, output_path: Path, bins: int, title: str):
+def _save_getdist_contour_plot(samples_phys, output_path: Path, title: str):
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    try:
+        from getdist import MCSamples
+        from getdist import plots as getdist_plots
+    except ImportError as exc:
+        raise RuntimeError(
+            "getdist is required for getdist-based contour plots. "
+            "Install it with: pip install getdist"
+        ) from exc
+
+    samples_phys = np.asarray(samples_phys, dtype=np.float64)
+    gd_samples = MCSamples(
+        samples=samples_phys,
+        names=["omegam", "s8"],
+        labels=[r"\Omega_m", r"S_8"],
+    )
+    plotter = getdist_plots.get_single_plotter(width_inch=5.8, ratio=0.85)
+    plotter.settings.num_plot_contours = 2
+    plotter.settings.alpha_filled_add = 0.65
+    plotter.plot_2d(gd_samples, "omegam", "s8", filled=True)
+    ax = plt.gca()
+    ax.set_title(title)
+    plotter.fig.tight_layout()
+    plotter.fig.savefig(output_path, dpi=160)
+    plt.close(plotter.fig)
+
+
+def _save_hist_contour_plot(samples_phys, output_path: Path, bins: int, title: str):
     import numpy as np
     import matplotlib
     matplotlib.use("Agg")
@@ -254,6 +292,40 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     if vol is not None:
         vol.reload()
 
+    wandb_run = None
+    if cfg.log_npe_to_wandb:
+        import wandb
+
+        run_name = f"{checkpoints_path.name or 'checkpoints'}-budget-{budget}"
+        run_tags = list(dict.fromkeys([*(cfg.wandb_npe_tags or []), f"budget-{budget}"]))
+        wandb_dir = npe_results_path / f"budget-{budget}"
+        wandb_dir.mkdir(parents=True, exist_ok=True)
+        wandb_run = wandb.init(
+            entity=cfg.wandb_npe_entity,
+            project=cfg.wandb_npe_project,
+            name=run_name,
+            mode=os.environ.get("WANDB_MODE", "offline"),
+            dir=str(wandb_dir),
+            tags=run_tags,
+            config={
+                "budget": int(budget),
+                "compressor_class_path": cfg.compressor_class_path,
+                "checkpoint_metric_name": cfg.checkpoint_metric_name,
+                "checkpoint_mode": cfg.checkpoint_mode,
+                "n_noise_realizations": int(cfg.n_noise_realizations),
+                "n_holdout_train_maps": int(cfg.n_holdout_train_maps),
+                "npe_epochs": int(cfg.npe_epochs),
+                "npe_lr": float(cfg.npe_lr),
+                "npe_batch_size": int(cfg.npe_batch_size),
+                "npe_patience": int(cfg.npe_patience),
+                "npe_seeds": int(cfg.npe_seeds),
+                "flow_transforms": int(cfg.flow_transforms),
+                "flow_hidden_dim": int(cfg.flow_hidden_dim),
+                "n_posterior_samples": int(cfg.n_posterior_samples),
+                "n_fiducial_maps": int(cfg.n_fiducial_maps),
+            },
+        )
+
     # ── 1-3. Load or compute summaries ──
     class_tag = cfg.compressor_class_path.split(".")[-1]
     checkpoints_tag = checkpoints_path.name or "checkpoints"
@@ -283,6 +355,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         summaries_tensor = cached["summaries"]
         thetas_tensor = cached["thetas"]
         theta_all = cached["theta_all_raw"]  # unnormalized, for FoM eval
+        n_maps = int(theta_all.shape[0])
         ckpt_path = cached["compressor_checkpoint"]
         print(
             f"Loaded {summaries_tensor.shape[0]} cached pairs "
@@ -457,12 +530,30 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             if (epoch + 1) % 50 == 0 or patience_counter == 0:
                 print(f"  Epoch {epoch+1:3d}: train_nll={mean_train:.4f}, val_nll={mean_val:.4f}, "
                       f"best={best_val_nll:.4f}, patience={patience_counter}/{cfg.npe_patience}")
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "npe/seed_index": int(seed),
+                        "npe/epoch": int(epoch + 1),
+                        "npe/train_nll": float(mean_train),
+                        "npe/val_nll": float(mean_val),
+                        "npe/best_val_nll_seed": float(best_val_nll),
+                        "npe/lr": float(optimizer.param_groups[0]["lr"]),
+                    }
+                )
 
             if patience_counter >= cfg.npe_patience:
                 print(f"  Early stopping at epoch {epoch+1}")
                 break
 
         print(f"  Seed {seed+1} best val NLL: {best_val_nll:.4f}")
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "npe/seed_index": int(seed),
+                    "npe/seed_best_val_nll": float(best_val_nll),
+                }
+            )
         if best_val_nll < overall_best_nll:
             overall_best_nll = best_val_nll
             overall_best_state = best_state
@@ -479,6 +570,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     flow.eval()
     best_val_nll = overall_best_nll
     print(f"\nOverall best val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f}")
+    if wandb_run is not None:
+        wandb_run.log({"npe/best_val_nll_overall": float(best_val_nll)})
 
     # ── 6. Compute FoM at fiducial cosmology ──
     print("Computing FoM (all fiducial maps)...")
@@ -538,6 +631,15 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
+    if wandb_run is not None:
+        wandb_run.log(
+            {
+                "fom/mean": float(fom_mean),
+                "fom/std": float(fom_std),
+                "fom/min": float(np.min(fom_values)),
+                "fom/max": float(np.max(fom_values)),
+            }
+        )
 
     # ── 7. Save results ──
     results_dir = npe_results_path / f"budget-{budget}"
@@ -569,14 +671,31 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 )
                 posterior_plot_files.append(out_plot.name)
                 out_contour = results_dir / f"posterior_fiducial_obs{obs_idx:02d}_contour.png"
-                _save_posterior_contour_plot(
-                    samples_phys_obs,
-                    out_contour,
-                    bins=cfg.posterior_plot_bins,
-                    title=f"Posterior contours (fiducial realization {obs_idx})",
-                )
+                if cfg.use_getdist_contours:
+                    _save_getdist_contour_plot(
+                        samples_phys_obs,
+                        out_contour,
+                        title=f"Posterior contours (fiducial realization {obs_idx})",
+                    )
+                else:
+                    _save_hist_contour_plot(
+                        samples_phys_obs,
+                        out_contour,
+                        bins=cfg.posterior_plot_bins,
+                        title=f"Posterior contours (fiducial realization {obs_idx})",
+                    )
                 posterior_contour_files.append(out_contour.name)
             print(f"Saved {len(posterior_plot_files)} posterior plot(s) to {results_dir}")
+    if wandb_run is not None and cfg.wandb_npe_log_images and cfg.save_posterior_plots:
+        import wandb
+
+        image_payload = {}
+        for obs_idx, fname in enumerate(posterior_plot_files):
+            image_payload[f"posterior/density_obs{obs_idx:02d}"] = wandb.Image(str(results_dir / fname))
+        for obs_idx, fname in enumerate(posterior_contour_files):
+            image_payload[f"posterior/contour_obs{obs_idx:02d}"] = wandb.Image(str(results_dir / fname))
+        if image_payload:
+            wandb_run.log(image_payload)
 
     results = {
         "budget": budget,
@@ -598,12 +717,20 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "compressor_checkpoint": ckpt_path,
         "save_posterior_samples": bool(cfg.save_posterior_samples),
         "save_posterior_plots": bool(cfg.save_posterior_plots),
+        "posterior_contour_backend": "getdist" if cfg.use_getdist_contours else "hist2d",
         "posterior_samples_norm_file": "posterior_samples_norm.npy" if cfg.save_posterior_samples else None,
         "posterior_samples_phys_file": "posterior_samples_phys.npy" if cfg.save_posterior_samples else None,
         "posterior_plot_files": posterior_plot_files if cfg.save_posterior_plots else [],
         "posterior_contour_files": posterior_contour_files if cfg.save_posterior_plots else [],
+        "wandb_npe_project": cfg.wandb_npe_project if cfg.log_npe_to_wandb else None,
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
+    if wandb_run is not None:
+        wandb_run.summary["results_dir"] = str(results_dir)
+        wandb_run.summary["fom_mean"] = float(fom_mean)
+        wandb_run.summary["fom_std"] = float(fom_std)
+        wandb_run.summary["best_val_nll"] = float(best_val_nll)
+        wandb_run.finish()
 
     if vol is not None:
         vol.commit()
@@ -632,6 +759,7 @@ if __name__ != "__main__":
             "jsonargparse[signatures,omegaconf]>=4.27.7",
             "peft",
             "nflows",
+            "getdist",
             "matplotlib",
             "scikit-learn",
         )

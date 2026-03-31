@@ -18,6 +18,9 @@ from typing import Dict, List
 
 import yaml
 
+COMPRESSION_WANDB_PROJECT = "neurips-wl-challenge-hos-compression"
+INFERENCE_WANDB_PROJECT = "neurips-wl-challenge-hos-npe"
+
 
 DEFAULT_REGIMES: Dict[str, dict] = {
     "ps_fixed": {
@@ -199,7 +202,7 @@ def _build_compressor_cfg(
                 "class_path": "WandbLogger",
                 "init_args": {
                     "name": f"hos_npe_{regime_id}_budget{budget}",
-                    "project": "neurips-wl-challenge",
+                    "project": COMPRESSION_WANDB_PROJECT,
                     "entity": "cosmostat",
                     "tags": ["hos-npe", "ablation-transfer", regime_id, f"budget-{budget}"],
                     "log_model": True,
@@ -217,8 +220,13 @@ def _build_npe_cfg(regime_id: str, budget: int, fiducial_maps: int):
         "checkpoint_metric_name": "val_log_prob",
         "checkpoint_mode": "min",
         "wandb_entity": "cosmostat",
-        "wandb_project": "neurips-wl-challenge",
+        "wandb_project": COMPRESSION_WANDB_PROJECT,
         "wandb_budget_tag": f"hos-npe-{regime_id}",
+        "log_npe_to_wandb": True,
+        "wandb_npe_entity": "cosmostat",
+        "wandb_npe_project": INFERENCE_WANDB_PROJECT,
+        "wandb_npe_tags": ["hos-npe", "ablation-transfer", regime_id, "inference"],
+        "wandb_npe_log_images": True,
         "n_noise_realizations": 16,
         "n_holdout_train_maps": 0,
         "npe_epochs": 500,
@@ -233,6 +241,7 @@ def _build_npe_cfg(regime_id: str, budget: int, fiducial_maps: int):
         "save_posterior_samples": True,
         "save_posterior_plots": True,
         "posterior_plot_bins": 80,
+        "use_getdist_contours": True,
     }
 
 

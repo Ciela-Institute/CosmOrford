@@ -57,10 +57,18 @@ source "$HOME/wl-challenge-env/bin/activate"
 python - <<'PY'
 import importlib.util
 import sys
+missing = []
 if importlib.util.find_spec("nflows") is None:
+    missing.append("nflows")
+if importlib.util.find_spec("getdist") is None:
+    missing.append("getdist")
+if missing:
     sys.stderr.write(
-        "ERROR: 'nflows' is not installed in $HOME/wl-challenge-env. "
-        "Install it once with: source $HOME/wl-challenge-env/bin/activate && pip install nflows\n"
+        "ERROR: missing dependencies in $HOME/wl-challenge-env: "
+        + ", ".join(missing)
+        + ". Install with: source $HOME/wl-challenge-env/bin/activate && pip install "
+        + " ".join(missing)
+        + "\n"
     )
     raise SystemExit(3)
 PY
@@ -135,6 +143,16 @@ python scripts/run_npe_budget_scan.py \
   --holdout_fiducial_path "$HOLDOUT_FIDUCIAL_PATH" \
   --config "$NPE_CONFIG" \
   --offline
+
+if [ "${WANDB_SYNC_AFTER_JOB:-1}" = "1" ]; then
+  echo ""
+  echo ">>> Syncing W&B offline runs (compression + inference pages)"
+  python scripts/sync_hos_npe_wandb.py \
+    --run-glob "$RUN_NAME*" \
+    --compression-root "$HOME/experiments/checkpoints" \
+    --inference-root "$HOME/experiments/npe_results" \
+    --sync-inference-backfill
+fi
 
 RESULTS_DIR="$NPE_RESULTS_PATH/budget-$BUDGET"
 echo ""

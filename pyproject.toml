@@ -51,6 +51,7 @@ dependencies = [
     "wandb",
     "peft",
     "nflows",
+    "getdist",
     "wl_stats_torch",
     "kymatio",
 ]

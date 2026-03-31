@@ -6,8 +6,13 @@ compressor_class_path: "cosmoford.models_nopatch.StatsCompressorNoPatch"
 checkpoint_metric_name: "val_log_prob"
 checkpoint_mode: "min"
 wandb_entity: "cosmostat"
-wandb_project: "neurips-wl-challenge"
+wandb_project: "neurips-wl-challenge-hos-compression"
 wandb_budget_tag: "hos-npe-hos-scat"
+log_npe_to_wandb: true
+wandb_npe_entity: "cosmostat"
+wandb_npe_project: "neurips-wl-challenge-hos-npe"
+wandb_npe_tags: ["hos-npe", "hos-scat", "inference"]
+wandb_npe_log_images: true
 
 n_noise_realizations: 16
 
@@ -20,3 +25,4 @@ flow_transforms: 4
 flow_hidden_dim: 64
 
 n_posterior_samples: 10000
+use_getdist_contours: true
