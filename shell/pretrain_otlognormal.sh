@@ -6,8 +6,8 @@
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=1
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ngll
 #SBATCH --array=0-5
+#SBATCH --job-name=pretrain_ot_lognormal
 #SBATCH --output=jobout/%x_%A_%a.out
 
 
@@ -23,28 +23,26 @@ SAVE_DIR=$(yq -r '.save_dir' ../global_config.yaml)
 # Changes Hugging face cache directory  
 export HF_HOME="~/links/scratch/cache"
 
-# Going to the repository directory
-cd $WDIR
-
-# Define your budget samples
 BUDGETS=(100 500 1000 5000 10000 20200)
 
 CURRENT_BUDGET=${BUDGETS[$SLURM_ARRAY_TASK_ID]}
 
-echo "Running job for budget: $CURRENT_BUDGET"
+# Going to the repository directory
+cd $WDIR
 
 # We use dot notation to reach deep into the YAML structure
-trainer fit \
-    -c configs/finetune_from_pretrain_nopatch_logp.yaml \
-    --data.init_args.max_train_samples=$CURRENT_BUDGET \
-    --trainer.logger.init_args.name="effnet_v2_s_nbody_budget_final_$CURRENT_BUDGET" \
-    --trainer.logger.init_args.save_dir="$SAVE_DIR/budget_scan_nbody_final/budget-$CURRENT_BUDGET" \
+uv run trainer fit \
+    -c configs/experiments/pretrain_gowerstreet_nopatch_logp.yaml \
+    --data.init_args.dataset_mode=ot-lognormal \
+    --data.init_args.ot_budget=$CURRENT_BUDGET\
+    --trainer.logger.init_args.name="effnet_v2_s_pretrain_ot-lognormal_$CURRENT_BUDGET" \
+    --trainer.logger.init_args.save_dir="$SAVE_DIR/pretrain_ot-lognormal/budget-$CURRENT_BUDGET" \
     --trainer.callbacks='[
     {"class_path": "LearningRateMonitor", "init_args": {"logging_interval": "step"}},
     {"class_path": "EMAWeightAveraging"},
     {"class_path": "ModelCheckpoint",
      "init_args": {
-       "dirpath": "'"$SAVE_DIR"'/budget_scan_nbody_final/budget-'"$CURRENT_BUDGET"'/checkpoints",
+       "dirpath": "'"$SAVE_DIR"'/pretrain_ot-lognormal/budget-'$CURRENT_BUDGET'/checkpoints",
        "monitor": "val_log_prob",
        "mode": "min",
        "save_top_k": 3,

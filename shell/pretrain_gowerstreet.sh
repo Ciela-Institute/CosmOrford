@@ -11,6 +11,7 @@
 
 
 # Running the python script
+module load python gcc arrow
 source ../.venv/bin/activate 
 wandb offline
 
@@ -24,9 +25,26 @@ export HF_HOME="~/links/scratch/cache"
 # Going to the repository directory
 cd $WDIR
 
-# Running experiment.
+# We use dot notation to reach deep into the YAML structure
 uv run trainer fit \
-    -c configs/experiments/pretrain_gowerstreet_nopatch_logp.yaml\
-    --trainer.logger.init_args.name="effnet_v2_s_gowerstreet_budget_final_$CURRENT_BUDGET" \
-    --trainer.logger.init_args.save_dir="$SAVE_DIR/gowerstreet/pretrain/budget-$CURRENT_BUDGET"
+    -c configs/experiments/pretrain_gowerstreet_nopatch_logp.yaml \
+    --data.init_args.dataset_mode=gowerstreet \
+    --trainer.logger.init_args.name="effnet_v2_s_pretrain_gowerstreet_$CURRENT_BUDGET" \
+    --trainer.logger.init_args.save_dir="$SAVE_DIR/pretrain_gowerstreet" \
+    --trainer.callbacks='[
+    {"class_path": "LearningRateMonitor", "init_args": {"logging_interval": "step"}},
+    {"class_path": "EMAWeightAveraging"},
+    {"class_path": "ModelCheckpoint",
+     "init_args": {
+       "dirpath": "'"$SAVE_DIR"'/pretrain_gowerstreet/checkpoints",
+       "monitor": "val_log_prob",
+       "mode": "min",
+       "save_top_k": 3,
+       "save_last": true,
+       "filename": "{step}-{val_log_prob:.4f}"
+     }
+    }
+  ]'
 
+
+    

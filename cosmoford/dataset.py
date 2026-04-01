@@ -70,7 +70,7 @@ def inverse_reshape_field_numpy(kappa_reduced, fill_value: float = 0.0):
 
 class ChallengeDataModule(L.LightningDataModule):
     def __init__(self, batch_size=64, num_workers=8, train_on_full_data=False, dataset_mode="train",
-                 max_train_samples: int = 0):
+                 max_train_samples: int = 0, ot_budget: int = 20200):
         """
         Args:
             batch_size: Batch size for dataloaders
@@ -88,6 +88,7 @@ class ChallengeDataModule(L.LightningDataModule):
         self.train_on_full_data = train_on_full_data
         self.dataset_mode = dataset_mode
         self.max_train_samples = max_train_samples
+        self.ot_budget = ot_budget
 
     def _collate_fn(self, batch):
         # Run the default collate function
@@ -154,6 +155,17 @@ class ChallengeDataModule(L.LightningDataModule):
             dset_ot = dset_ot.with_format("torch")
             self.train_dataset = dset_ot
             self.val_dataset = dset['validation']
+
+        elif self.dataset_mode == "ot-lognormal":
+            # Load lognormal pretraining dataset
+            dset_ot = DatasetDict.load_from_disk(shared_dir + "unet_lognormal_small_budget_scan")
+            dset_ot = dset_ot[f"budget_{self.ot_budget}"]
+            dset_ot = dset_ot.rename_column('maps', 'kappa')
+            dset_ot = dset_ot.shuffle(seed=42)
+            dset_ot = dset_ot.with_format("torch")
+            self.train_dataset = dset_ot
+            self.val_dataset = dset['validation']
+
         elif self.dataset_mode == "train":
             # Use regular training set
             self.train_dataset = dset['train']

@@ -6,13 +6,12 @@
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=1
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ngll
+#SBATCH --job-name=finetune_gowerstreet
 #SBATCH --array=0-5
 #SBATCH --output=jobout/%x_%A_%a.out
 
 
 # Running the python script
-module load python gcc arrow
 source ../.venv/bin/activate 
 wandb offline
 
@@ -33,18 +32,19 @@ CURRENT_BUDGET=${BUDGETS[$SLURM_ARRAY_TASK_ID]}
 
 echo "Running job for budget: $CURRENT_BUDGET"
 
-# We use dot notation to reach deep into the YAML structure
-trainer fit \
-    -c configs/finetune_from_pretrain_nopatch_logp.yaml \
+# Running experiment.
+uv run trainer fit \
+    -c configs/experiments/finetune_from_pretrain_gowerstreet_nopatch_logp.yaml\
     --data.init_args.max_train_samples=$CURRENT_BUDGET \
-    --trainer.logger.init_args.name="effnet_v2_s_nbody_budget_final_$CURRENT_BUDGET" \
-    --trainer.logger.init_args.save_dir="$SAVE_DIR/budget_scan_nbody_final/budget-$CURRENT_BUDGET" \
+    --model.init_args.pretrained_checkpoint_path=/home/noedia/links/scratch/wl_chall/pretrain_gowerstreet/checkpoints/last.ckpt \
+    --trainer.logger.init_args.name="effnet_v2_s_gowerstreet_$CURRENT_BUDGET" \
+    --trainer.logger.init_args.save_dir="$SAVE_DIR/budget_scan_gowerstreet/budget-$CURRENT_BUDGET" \
     --trainer.callbacks='[
     {"class_path": "LearningRateMonitor", "init_args": {"logging_interval": "step"}},
     {"class_path": "EMAWeightAveraging"},
     {"class_path": "ModelCheckpoint",
      "init_args": {
-       "dirpath": "'"$SAVE_DIR"'/budget_scan_nbody_final/budget-'"$CURRENT_BUDGET"'/checkpoints",
+       "dirpath": "'"$SAVE_DIR"'/budget_scan_gowerstreet/budget-'"$CURRENT_BUDGET"'/checkpoints",
        "monitor": "val_log_prob",
        "mode": "min",
        "save_top_k": 3,
@@ -54,5 +54,3 @@ trainer fit \
     }
   ]'
 
-
-    
