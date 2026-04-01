@@ -337,6 +337,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
     fom_values = []
+    mse_values = []
+    all_samples = []
     with torch.no_grad():
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
@@ -363,15 +365,29 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 fom = 0.0
             fom_values.append(fom)
 
+            # Compute MSE to cosmological parameters (for reference, not used in FoM)
+            theta_true = theta_all[0, :2]  # all fiducial maps have same theta
+            mse = np.mean((samples_phys - theta_true) ** 2)
+            mse_values.append(mse)
+
+            # Store samples for potential later analysis
+            all_samples.append(samples_phys)
+
+
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
+
+    mse_mean = np.mean(mse_values)
+    mse_std = np.std(mse_values)
+    print(f"  MSE = {mse_mean:.4f} ± {mse_std:.4f}")
 
     # ── 7. Save results ──
     results_dir = npe_results_path / f"budget-{budget}"
     results_dir.mkdir(parents=True, exist_ok=True)
 
     torch.save(best_state, results_dir / "npe_flow.pt")
+    np.save(results_dir / "posterior_samples.npy", np.array(all_samples))  # (n_maps, n_samples, 2)
 
     results = {
         "budget": budget,
@@ -383,6 +399,9 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": cfg.n_posterior_samples,
         "compressor_checkpoint": ckpt_path,
+        "mse_mean": float(mse_mean),
+        "mse_std": float(mse_std),
+        "mse_values": [float(v) for v in mse_values],
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
