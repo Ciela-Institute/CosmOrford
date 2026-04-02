@@ -375,8 +375,10 @@ def _run_pqm(model, label, seed, fig_path, chi2_key, plot_key, extra_log=None):
         ])  # (101, H, W)
         maps_ref = reshape_field_numpy(kappa_ref)  # (101, H_red, W_red)
 
-        # Generated: random lognormal inputs → ODE (no OT pairing)
-        ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, n_cosmo, seed + 1000)
+        # Generated: random lognormal inputs → ODE (no OT pairing).
+        # Draw 500 maps for better Voronoi cell coverage in PQMass.
+        n_gen = 500
+        ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, n_gen, seed + 1000)
         batch_pqm_logn = next(ds_pqm_logn)
         kappa_logn = np.array(batch_pqm_logn['kappa'])
         theta_logn = np.array(batch_pqm_logn['theta'])
@@ -400,8 +402,7 @@ def _run_pqm(model, label, seed, fig_path, chi2_key, plot_key, extra_log=None):
             pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
         maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
 
-        # num_refs must be < min(N_ref, N_gen); 50 is safely below 101
-        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=50)
+        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=10)
         fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
