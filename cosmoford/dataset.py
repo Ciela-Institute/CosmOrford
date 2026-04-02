@@ -161,7 +161,7 @@ class ChallengeDataModule(L.LightningDataModule):
             dset_ot = DatasetDict.load_from_disk(shared_dir + "unet_lognormal_small_budget_scan")
             dset_ot = dset_ot[f"budget_{self.ot_budget}"]
             dset_ot = dset_ot.rename_column('maps', 'kappa')
-            dset_ot = dset_ot.shuffle(seed=42)
+            # dset_ot = dset_ot.shuffle(seed=42) removing it for now since write access needed for this
             dset_ot = dset_ot.with_format("torch")
             self.train_dataset = dset_ot
             self.val_dataset = dset['validation']

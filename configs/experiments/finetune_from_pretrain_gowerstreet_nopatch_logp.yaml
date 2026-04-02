@@ -22,7 +22,7 @@ data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
     batch_size: 64
-    num_workers: 12
+    num_workers: 1
     dataset_mode: "train"
 
 trainer:

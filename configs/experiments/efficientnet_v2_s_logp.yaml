@@ -14,7 +14,7 @@ data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
     batch_size: 64
-    num_workers: 8
+    num_workers: 1
 
 trainer:
   max_steps: 13000

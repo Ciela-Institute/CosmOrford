@@ -5,7 +5,7 @@
 #SBATCH --account=rrg-lplevass
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=1
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=h100_40gb
 #SBATCH --array=0-5
 #SBATCH --job-name=pretrain_ot_lognormal
 #SBATCH --output=jobout/%x_%A_%a.out

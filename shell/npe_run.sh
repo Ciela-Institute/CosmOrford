@@ -1,12 +1,12 @@
 #!/bin/bash
 # SLURM parameters for every job submitted
 #SBATCH --tasks=1
-#SBATCH --time=00-03:00 # time (DD-HH:MM)
+#SBATCH --time=00-08:00 # time (DD-HH:MM)
 #SBATCH --account=rrg-lplevass
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=1
-#SBATCH --gpus-per-node=1
-#SBATCH --job-name=run_npe_nbody
+#SBATCH --gpus-per-node=h100_20gb
+#SBATCH --job-name=run_npe_gowerstreet
 #SBATCH --output=jobout/%x_%A_%a.out
 
 # Running the python script
@@ -24,10 +24,9 @@ export HF_HOME="~/links/scratch/cache"
 cd $WDIR
 
 python scripts/run_npe_budget_scan.py \
-    --checkpoints_path=/home/noedia/links/scratch/wl_chall/budget_scan_nbody_final\
-    --npe_results_path=/home/noedia/links/scratch/wl_chall/npe_results\
+    --checkpoints_path=/home/noedia/links/scratch/wl_chall/budget_scan_gowerstreet\
+    --npe_results_path=/home/noedia/links/scratch/wl_chall/gowerstreet/npe_results\
     --summaries_cache_path= \
     --holdout_path=/home/noedia/links/projects/rrg-lplevass/shared/wl_chall_data/neurips-wl-challenge-holdout\
     --config=configs/experiments/npe_budget_scan.yaml\
-    --budgets=20200\
     --offline=true

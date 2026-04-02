@@ -5,7 +5,7 @@
 #SBATCH --account=rrg-lplevass
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=1
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=h100_20gb
 #SBATCH --job-name=pretrain_gowerstreet
 #SBATCH --output=jobout/%x_%A_%a.out
 
