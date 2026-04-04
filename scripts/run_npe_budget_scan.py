@@ -29,7 +29,7 @@ from glob import glob
 @dataclass
 class NPEConfig:
     budgets: List[int] = field(default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200])
-    n_noise_realizations: int = 16
+    n_noise_realizations: int = 1
     npe_epochs: int = 500
     npe_lr: float = 1e-3
     npe_batch_size: int = 512
@@ -201,8 +201,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
 
                 for _ in range(cfg.n_noise_realizations):
-                    noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-                    noisy = (kappa_reshaped + noise) * mask
+                    # noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
+                    noisy = kappa_reshaped * mask # kappa maps from the holdout dataset are already noisy
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
                     s = compressor.compress(x)  # (1, 8)
                     all_summaries.append(s.cpu())
@@ -343,7 +343,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
             # Single noisy observation
             noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-            noisy = (kappa_reshaped + noise) * mask
+            # noisy = (kappa_reshaped + noise) * mask
+            noisy = kappa_reshaped * mask # the holdout dataset is already noisy. 
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
 
@@ -386,7 +387,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
-    vol.commit()
+    if vol is not None:
+        vol.commit()
     print(f"Results saved to {results_dir}")
     print(f"Budget {budget}: DONE (FoM = {fom_mean:.2f} ± {fom_std:.2f})")
     return results
