@@ -343,7 +343,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
             # Single noisy observation
             noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-            noisy = (kappa_reshaped + noise) * mask
+            # noisy = (kappa_reshaped + noise) * mask
+            noisy = kappa_reshaped * mask # the holdout dataset is already noisy. 
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
 

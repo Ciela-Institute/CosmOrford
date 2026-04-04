@@ -24,8 +24,8 @@ export HF_HOME="~/links/scratch/cache"
 cd $WDIR
 
 python scripts/run_npe_budget_scan.py \
-    --checkpoints_path=/home/noedia/links/scratch/wl_chall/budget_scan_gowerstreet\
-    --npe_results_path=/home/noedia/links/scratch/wl_chall/gowerstreet/npe_results\
+    --checkpoints_path=/home/noedia/links/scratch/wl_chall/budget_scan_nbody_final\
+    --npe_results_path=/home/noedia/links/scratch/wl_chall/budget_scan_nbody_final/npe_results\
     --summaries_cache_path= \
     --holdout_path=/home/noedia/links/projects/rrg-lplevass/shared/wl_chall_data/neurips-wl-challenge-holdout\
     --config=configs/experiments/npe_budget_scan.yaml\
