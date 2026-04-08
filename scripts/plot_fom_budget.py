@@ -53,6 +53,17 @@ def _plot_core(npe_results_path: Path, output_path: str):
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
 
+    if ".pdf" in output_path: 
+        output_path = output_path.split(".pdf")[0]
+    
+    # Saving data points
+    np.savez(
+        output_path + ".npz",
+        budgets = budgets, 
+        fom_means = fom_means, 
+        fom_stds = fom_stds 
+    )
+
 
 # ── Modal entry point (only loaded when invoked via `modal run`) ──────────────
 if __name__ != "__main__":
@@ -77,6 +88,8 @@ if __name__ != "__main__":
         Path(output).write_bytes(pdf_bytes)
         print(f"Plot saved to {output}")
 
+        
+
 
 # ── Local entry point ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -95,3 +108,9 @@ if __name__ == "__main__":
 
     _plot_core(Path(args.experiments_dir) / "npe_results", args.output)
     print(f"Plot saved to {args.output}")
+
+    if ".pdf" in args.output: 
+        data_path = args.output.split(".pdf")[0]
+    else: 
+        data_path = args.output
+    print(f"Data points saved to {data_path}.npz")
