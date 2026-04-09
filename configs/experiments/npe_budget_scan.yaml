@@ -18,7 +18,7 @@ wandb_npe_tags: ["hos-npe", "inference"]
 wandb_npe_log_images: true
 
 # Summary pre-computation
-n_noise_realizations: 16
+n_noise_realizations: 1
 
 # NPE training
 npe_epochs: 500

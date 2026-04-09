@@ -47,7 +47,7 @@ class NPEConfig:
     wandb_npe_project: str = "neurips-wl-challenge-hos-npe"
     wandb_npe_tags: List[str] = field(default_factory=lambda: ["hos-npe", "inference"])
     wandb_npe_log_images: bool = True
-    n_noise_realizations: int = 16
+    n_noise_realizations: int = 1
     n_holdout_train_maps: int = 0  # 0 means "use all"
     npe_epochs: int = 500
     npe_lr: float = 1e-3
@@ -418,8 +418,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
 
                 for _ in range(cfg.n_noise_realizations):
-                    noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-                    noisy = (kappa_reshaped + noise) * mask
+                    # noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
+                    noisy = kappa_reshaped * mask # kappa maps from the holdout dataset are already noisy
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
                     s = compressor.compress(x)  # (1, 8)
                     all_summaries.append(s.cpu())
@@ -605,7 +605,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
             # Single noisy observation
             noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-            noisy = (kappa_reshaped + noise) * mask
+            # noisy = (kappa_reshaped + noise) * mask
+            noisy = kappa_reshaped * mask # the holdout dataset is already noisy. 
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
 
