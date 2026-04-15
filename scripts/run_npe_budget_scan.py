@@ -2,7 +2,7 @@
 
 For each budget checkpoint from the compressor budget scan:
 1. Load frozen compressor
-2. Pre-compute summaries with noise augmentation on holdout data
+2. Pre-compute summaries on holdout data (noise already present in dataset)
 3. Train NPE (conditional MAF) on (summary, theta) pairs
 4. Evaluate FoM at fiducial cosmology
 
@@ -10,6 +10,7 @@ Usage:
     .venv/bin/modal run scripts/run_npe_budget_scan.py
 """
 from pathlib import Path
+from typing import Optional
 
 import modal
 
@@ -48,7 +49,6 @@ SUMMARIES_CACHE_PATH = VOLUME_PATH / "summaries_cache"
 BUDGETS = [100, 200, 500, 1000, 2000, 5000, 10000, 20200]
 
 # NPE training hyperparameters
-N_NOISE_REALIZATIONS = 16
 NPE_EPOCHS = 500
 NPE_LR = 1e-3
 NPE_BATCH_SIZE = 512
@@ -136,7 +136,7 @@ def train_npe_for_budget(budget: int):
     import torch
     from datasets import load_dataset
 
-    from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD
+    from cosmoford import THETA_MEAN, THETA_STD
     from cosmoford.dataset import reshape_field_numpy
     from cosmoford.models_nopatch import RegressionModelNoPatch, build_flow
 
@@ -149,7 +149,7 @@ def train_npe_for_budget(budget: int):
 
     # ── 1-3. Load or compute summaries ──
     cache_dir = SUMMARIES_CACHE_PATH / f"budget-{budget}"
-    cache_file = cache_dir / f"summaries_n{N_NOISE_REALIZATIONS}.pt"
+    cache_file = cache_dir / "summaries.pt"
     compressor = None  # loaded lazily for FoM eval
 
     if cache_file.exists():
@@ -191,8 +191,8 @@ def train_npe_for_budget(budget: int):
         from cosmoford import SURVEY_MASK
         mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
-        # ── 3. Pre-compute summaries with noise augmentation ──
-        print(f"Pre-computing summaries ({N_NOISE_REALIZATIONS} noise realizations per map)...")
+        # ── 3. Pre-compute summaries (holdout already contains noise) ──
+        print("Pre-computing summaries...")
         all_summaries = []
         all_thetas = []
 
@@ -201,19 +201,17 @@ def train_npe_for_budget(budget: int):
                 kappa_i = kappa_all[i]  # (1424, 176)
                 kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
 
-                for _ in range(N_NOISE_REALIZATIONS):
-                    noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-                    noisy = (kappa_reshaped + noise) * mask
-                    x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
-                    s = compressor.compress(x)  # (1, 8)
-                    all_summaries.append(s.cpu())
-                    all_thetas.append(theta_norm[i])
+                masked = kappa_reshaped * mask
+                x = torch.from_numpy(masked).unsqueeze(0).to(device)  # (1, 1834, 88)
+                s = compressor.compress(x)  # (1, 8)
+                all_summaries.append(s.cpu())
+                all_thetas.append(theta_norm[i])
 
                 if (i + 1) % 1000 == 0:
                     print(f"  Processed {i+1}/{n_maps} maps")
 
-        summaries_tensor = torch.cat(all_summaries, dim=0)  # (N*n_noise, 8)
-        thetas_tensor = torch.from_numpy(np.array(all_thetas))  # (N*n_noise, 2)
+        summaries_tensor = torch.cat(all_summaries, dim=0)  # (N, 8)
+        thetas_tensor = torch.from_numpy(np.array(all_thetas))  # (N, 2)
 
         # Cache to volume
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -222,7 +220,6 @@ def train_npe_for_budget(budget: int):
             "thetas": thetas_tensor,
             "theta_all_raw": theta_all,
             "compressor_checkpoint": ckpt_path,
-            "n_noise_realizations": N_NOISE_REALIZATIONS,
         }, cache_file)
         volume.commit()
         print(f"Cached summaries to {cache_file}")
@@ -341,10 +338,9 @@ def train_npe_for_budget(budget: int):
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
 
-            # Single noisy observation
-            noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-            noisy = (kappa_reshaped + noise) * mask
-            x = torch.from_numpy(noisy).unsqueeze(0).to(device)
+            # Holdout fiducial maps already contain noise
+            masked = kappa_reshaped * mask
+            x = torch.from_numpy(masked).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
 
             # Sample posterior
@@ -381,7 +377,6 @@ def train_npe_for_budget(budget: int):
         "fom_std": float(fom_std),
         "fom_values": [float(v) for v in fom_values],
         "best_val_nll": float(best_val_nll),
-        "n_noise_realizations": N_NOISE_REALIZATIONS,
         "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": N_POSTERIOR_SAMPLES,
         "compressor_checkpoint": ckpt_path,
@@ -413,9 +408,10 @@ def load_all_results() -> list[dict]:
 
 
 @app.local_entrypoint()
-def main():
+def main(budget: Optional[int] = None):
+    budgets = [budget] if budget is not None else BUDGETS
     handles = []
-    for n in BUDGETS:
+    for n in budgets:
         print(f"Spawning NPE pipeline for budget-{n}")
         handles.append(train_npe_for_budget.spawn(n))
 

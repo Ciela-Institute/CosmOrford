@@ -104,9 +104,10 @@ def train_budget(config_path: str, experiment_name: str, cli_overrides: list):
 
 
 @app.local_entrypoint()
-def main():
+def main(budget: Optional[int] = None):
+    budgets = [budget] if budget is not None else BUDGETS
     handles = []
-    for n in BUDGETS:
+    for n in budgets:
         name = f"budget-{n}"
         overrides = [
             f"--data.init_args.max_train_samples={n}",
