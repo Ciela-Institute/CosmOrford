@@ -133,7 +133,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     import numpy as np
     import torch
 
-    from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD
+    from cosmoford import THETA_MEAN, THETA_STD
     from cosmoford.dataset import reshape_field_numpy
     from cosmoford.models_nopatch import RegressionModelNoPatch, build_flow
 
@@ -341,10 +341,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
 
-            # Single noisy observation
-            noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-            # noisy = (kappa_reshaped + noise) * mask
-            noisy = kappa_reshaped * mask # the holdout dataset is already noisy. 
+            # Holdout fiducial maps already contain noise
+            noisy = kappa_reshaped * mask
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
 
