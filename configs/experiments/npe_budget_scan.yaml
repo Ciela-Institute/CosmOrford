@@ -8,7 +8,7 @@ budgets: [100, 1000, 5000, 10000, 20200]
 n_noise_realizations: 1
 
 # NPE training
-npe_epochs: 200
+npe_epochs: 100
 npe_lr: 1.0e-4
 npe_batch_size: 128
 npe_patience: 50
