@@ -1,17 +1,17 @@
-"""Plot 2D KDE posterior contours for fiducial holdout and validation maps.
+"""Plot 2D KDE posterior contours for fiducial and train splits of holdout.
 
 Produces two figures:
-  - npe_posteriors_fiducial.png: 4 fiducial holdout maps (no noise added)
-  - npe_posteriors_validation.png: 4 validation maps (noise added)
+  - npe_posteriors_fiducial.png: 4 fiducial holdout maps
+  - npe_posteriors_train.png: 4 train holdout maps
 
-Each figure is a 2x2 grid with 1/2-sigma KDE contours.
+Each figure is a 2x2 grid with 1/2-sigma KDE contours. No noise is added
+(holdout data already contains noise).
 
 Usage:
     python scripts/plot_npe_posteriors.py \
         --compressor_checkpoint /path/to/compressor.ckpt \
         --npe_checkpoint /path/to/npe_results/budget-20200/npe_flow.pt \
         --holdout_path /path/to/neurips-wl-challenge-holdout \
-        --validation_path /path/to/neurips-wl-challenge-flat \
         --output_dir /path/to/output \
         [--n_samples 10000]
 """
@@ -24,21 +24,17 @@ import torch
 from datasets import load_from_disk
 from scipy.stats import gaussian_kde
 
-from cosmoford import NOISE_STD, SURVEY_MASK, THETA_MEAN, THETA_STD
+from cosmoford import SURVEY_MASK, THETA_MEAN, THETA_STD
 from cosmoford.dataset import reshape_field_numpy
 from cosmoford.models_nopatch import RegressionModelNoPatch, build_flow
 
 
-def compress_maps(compressor, kappa_maps, mask, device, add_noise):
+def compress_maps(compressor, kappa_maps, mask, device):
     summaries = []
     with torch.no_grad():
         for kappa_i in kappa_maps:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
-            if add_noise:
-                noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-                x_np = (kappa_reshaped + noise) * mask
-            else:
-                x_np = kappa_reshaped * mask
+            x_np = kappa_reshaped * mask
             x = torch.from_numpy(x_np).unsqueeze(0).to(device)
             summaries.append(compressor.compress(x))
     return summaries
@@ -101,8 +97,6 @@ def main():
     parser.add_argument("--npe_checkpoint", required=True, help="Path to NPE flow .pt")
     parser.add_argument("--holdout_path", required=True,
                         help="Path to neurips-wl-challenge-holdout (DatasetDict on disk)")
-    parser.add_argument("--validation_path", required=True,
-                        help="Path to neurips-wl-challenge-flat (DatasetDict on disk)")
     parser.add_argument("--output_dir", required=True, help="Directory for output figures")
     parser.add_argument("--n_samples", type=int, default=10_000, help="Posterior samples per map")
     args = parser.parse_args()
@@ -126,9 +120,11 @@ def main():
     flow.load_state_dict(torch.load(args.npe_checkpoint, map_location=device, weights_only=False))
     flow.eval()
 
-    # --- Fiducial holdout (no noise added) ---
-    print("Loading fiducial holdout maps...")
+    # Load holdout dataset
+    print("Loading holdout dataset...")
     holdout = load_from_disk(args.holdout_path)
+
+    # --- Fiducial split ---
     fiducial = holdout["fiducial"].with_format("numpy")
     kappa_fid = np.array(fiducial["kappa"])
     theta_fid = np.array(fiducial["theta"])
@@ -137,25 +133,23 @@ def main():
     indices_fid = np.linspace(0, len(kappa_fid) - 1, n_fid, dtype=int)
 
     print(f"Compressing {n_fid} fiducial maps...")
-    summaries_fid = compress_maps(compressor, kappa_fid, mask, device, add_noise=False)
+    summaries_fid = compress_maps(compressor, kappa_fid, mask, device)
     plot_posterior_grid(flow, summaries_fid, theta_fid, indices_fid, args.n_samples,
                         device, "NPE posteriors — fiducial holdout",
                         output_dir / "npe_posteriors_fiducial.png")
 
-    # --- Validation set (noise added) ---
-    print("Loading validation maps...")
-    val_ds = load_from_disk(args.validation_path)
-    val_ds = val_ds["validation"].with_format("numpy")
-    n_val = min(4, len(val_ds))
-    indices_val = np.linspace(0, len(val_ds) - 1, n_val, dtype=int)
-    kappa_val = np.array(val_ds["kappa"])
-    theta_val = np.array(val_ds["theta"])
+    # --- Train split ---
+    train_ds = holdout["train"].with_format("numpy")
+    n_train = min(4, len(train_ds))
+    indices_train = np.linspace(0, len(train_ds) - 1, n_train, dtype=int)
+    kappa_train = np.array(train_ds["kappa"])
+    theta_train = np.array(train_ds["theta"])
 
-    print(f"Compressing {n_val} validation maps (with noise)...")
-    summaries_val = compress_maps(compressor, kappa_val, mask, device, add_noise=True)
-    plot_posterior_grid(flow, summaries_val, theta_val, indices_val, args.n_samples,
-                        device, "NPE posteriors — validation set",
-                        output_dir / "npe_posteriors_validation.png")
+    print(f"Compressing {n_train} train maps...")
+    summaries_train = compress_maps(compressor, kappa_train, mask, device)
+    plot_posterior_grid(flow, summaries_train, theta_train, indices_train, args.n_samples,
+                        device, "NPE posteriors — train holdout",
+                        output_dir / "npe_posteriors_train.png")
 
 
 if __name__ == "__main__":
