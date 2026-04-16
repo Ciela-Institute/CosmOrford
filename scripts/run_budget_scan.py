@@ -163,6 +163,7 @@ if __name__ == "__main__":
             f"--trainer.logger.init_args.name={name}",
             "--trainer.logger.init_args.tags=[budget-scan]",
             "--model.init_args.pretrained=false",
+            "--trainer.check_val_every_n_epoch=null",
         ]
         print(f"\n=== Running {name} (max_train_samples={n}) ===")
         _run_training(args.base_config, checkpoint_dir, overrides)
