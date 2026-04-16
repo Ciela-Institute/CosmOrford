@@ -249,6 +249,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.npe_batch_size)
 
     # ── 5. Train NPE (multiple seeds, keep best) ──
+    import wandb
+
     overall_best_nll = float("inf")
     overall_best_state = None
 
@@ -258,6 +260,23 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         flow = build_flow(param_dim=2, context_dim=8).to(device)
         optimizer = torch.optim.Adam(flow.parameters(), lr=cfg.npe_lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.npe_epochs)
+
+        wandb.init(
+            project="neurips-wl-challenge",
+            name=f"npe-budget-{budget}-seed-{seed}",
+            config={
+                "budget": budget,
+                "seed": seed,
+                "npe_epochs": cfg.npe_epochs,
+                "npe_lr": cfg.npe_lr,
+                "npe_batch_size": cfg.npe_batch_size,
+                "npe_patience": cfg.npe_patience,
+                "n_train": n_train,
+                "n_val": n_val,
+            },
+            tags=["npe", f"budget-{budget}"],
+            reinit=True,
+        )
 
         best_val_nll = float("inf")
         patience_counter = 0
@@ -288,6 +307,14 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             mean_train = np.mean(train_losses)
             mean_val = np.mean(val_losses)
 
+            wandb.log({
+                "train_nll": mean_train,
+                "val_nll": mean_val,
+                "best_val_nll": best_val_nll,
+                "lr": scheduler.get_last_lr()[0],
+                "epoch": epoch,
+            })
+
             if mean_val < best_val_nll:
                 best_val_nll = mean_val
                 patience_counter = 0
@@ -304,6 +331,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 break
 
         print(f"  Seed {seed+1} best val NLL: {best_val_nll:.4f}")
+        wandb.finish()
         if best_val_nll < overall_best_nll:
             overall_best_nll = best_val_nll
             overall_best_state = best_state
