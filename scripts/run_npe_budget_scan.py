@@ -29,7 +29,7 @@ from glob import glob
 @dataclass
 class NPEConfig:
     budgets: List[int] = field(default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200])
-    n_noise_realizations: int = 16
+    n_noise_realizations: int = 1
     npe_epochs: int = 500
     npe_lr: float = 1e-3
     npe_batch_size: int = 512
@@ -137,11 +137,32 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     from cosmoford.dataset import reshape_field_numpy
     from cosmoford.models_nopatch import RegressionModelNoPatch, build_flow
 
+    import os
+    import wandb
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*60}")
     print(f"Budget {budget}: starting NPE pipeline")
     print(f"{'='*60}")
     print(f"Config: {cfg}")
+
+    _wandb_config = {
+        "budget": budget,
+        "npe_epochs": cfg.npe_epochs,
+        "npe_lr": cfg.npe_lr,
+        "npe_batch_size": cfg.npe_batch_size,
+        "npe_patience": cfg.npe_patience,
+        "npe_seeds": cfg.npe_seeds,
+        "n_noise_realizations": cfg.n_noise_realizations,
+        "n_posterior_samples": cfg.n_posterior_samples,
+    }
+    _wandb_kwargs = dict(
+        entity="cosmostat",
+        project="neurips-wl-challenge",
+        mode=os.environ.get("WANDB_MODE", "offline"),
+        config=_wandb_config,
+        dir=str(npe_results_path),
+    )
 
     if vol is not None:
         vol.reload()
@@ -201,8 +222,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
 
                 for _ in range(cfg.n_noise_realizations):
-                    noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-                    noisy = (kappa_reshaped + noise) * mask
+                    noisy = kappa_reshaped # kappa maps from the holdout dataset are already noisy and masked
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
                     s = compressor.compress(x)  # (1, 8)
                     all_summaries.append(s.cpu())
@@ -249,11 +269,16 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.npe_batch_size)
 
     # ── 5. Train NPE (multiple seeds, keep best) ──
+    results_dir = npe_results_path / f"budget-{budget}"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    wandb.init(name=f"npe_budget_{budget}", **_wandb_kwargs)
     overall_best_nll = float("inf")
     overall_best_state = None
 
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
+
         torch.manual_seed(seed + 42)
         flow = build_flow(param_dim=2, context_dim=8).to(device)
         optimizer = torch.optim.Adam(flow.parameters(), lr=cfg.npe_lr)
@@ -272,6 +297,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 loss = -flow.log_prob(t_batch, context=s_batch).mean()
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
                 optimizer.step()
                 train_losses.append(loss.item())
             scheduler.step()
@@ -282,11 +308,17 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             with torch.no_grad():
                 for s_batch, t_batch in val_loader:
                     s_batch, t_batch = s_batch.to(device), t_batch.to(device)
-                    val_loss = -flow.log_prob(t_batch, context=s_batch).mean()
-                    val_losses.append(val_loss.item())
+                    val_losses.append(-flow.log_prob(t_batch, context=s_batch).mean().item())
 
             mean_train = np.mean(train_losses)
             mean_val = np.mean(val_losses)
+
+            wandb.log({
+                f"seed{seed+1}/train_nll": mean_train,
+                f"seed{seed+1}/val_nll": mean_val,
+                f"seed{seed+1}/lr": optimizer.param_groups[0]['lr'],
+                f"seed{seed+1}/epoch": epoch,
+            })
 
             if mean_val < best_val_nll:
                 best_val_nll = mean_val
@@ -304,6 +336,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 break
 
         print(f"  Seed {seed+1} best val NLL: {best_val_nll:.4f}")
+        wandb.log({f"seed{seed+1}/best_val_nll": best_val_nll})
+
         if best_val_nll < overall_best_nll:
             overall_best_nll = best_val_nll
             overall_best_state = best_state
@@ -337,15 +371,11 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
     fom_values = []
-    mse_values = []
-    all_samples = []
+    all_posterior_samples = []  # (n_maps, n_posterior_samples, 2) in physical units
     with torch.no_grad():
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
-
-            # Single noisy observation
-            noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-            noisy = (kappa_reshaped + noise) * mask
+            noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
 
@@ -355,6 +385,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
             # Unnormalize to physical parameters
             samples_phys = samples * THETA_STD[:2] + THETA_MEAN[:2]
+            all_posterior_samples.append(samples_phys)
 
             # Compute FoM = 1 / sqrt(det(Cov))
             cov = np.cov(samples_phys.T)  # (2, 2)
@@ -365,29 +396,19 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 fom = 0.0
             fom_values.append(fom)
 
-            # Compute MSE to cosmological parameters (for reference, not used in FoM)
-            theta_true = theta_all[0, :2]  # all fiducial maps have same theta
-            mse = np.mean((samples_phys - theta_true) ** 2)
-            mse_values.append(mse)
-
-            # Store samples for potential later analysis
-            all_samples.append(samples_phys)
-
-
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
 
-    mse_mean = np.mean(mse_values)
-    mse_std = np.std(mse_values)
-    print(f"  MSE = {mse_mean:.4f} ± {mse_std:.4f}")
-
     # ── 7. Save results ──
-    results_dir = npe_results_path / f"budget-{budget}"
-    results_dir.mkdir(parents=True, exist_ok=True)
-
     torch.save(best_state, results_dir / "npe_flow.pt")
-    np.save(results_dir / "posterior_samples.npy", np.array(all_samples))  # (n_maps, n_samples, 2)
+
+    # Save posterior samples: shape (n_fiducial_maps, n_posterior_samples, 2)
+    # columns: [Omega_m, S_8] in physical units
+    posterior_samples_arr = np.stack(all_posterior_samples, axis=0)
+    np.save(results_dir / "posterior_samples.npy", posterior_samples_arr)
+    print(f"Posterior samples saved to {results_dir / 'posterior_samples.npy'} "
+          f"(shape {posterior_samples_arr.shape})")
 
     results = {
         "budget": budget,
@@ -399,11 +420,66 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": cfg.n_posterior_samples,
         "compressor_checkpoint": ckpt_path,
-        "mse_mean": float(mse_mean),
-        "mse_std": float(mse_std),
-        "mse_values": [float(v) for v in mse_values],
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
+
+    # ── 8. GetDist posterior plot ──
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from getdist import MCSamples, plots as gdplots
+
+    # Prior bounds from the challenge dataset
+    PRIOR_BOUNDS = {
+        "Omega_m": (0.0913, 0.6190),
+        "S_8":     (0.6801, 0.9552),
+    }
+    fiducial_omega_m = THETA_MEAN[0]
+    fiducial_s8 = THETA_MEAN[1]
+
+    # Build a flat prior MCSamples so getdist renders it as a box
+    n_prior = 50_000
+    prior_samples = np.column_stack([
+        np.random.uniform(*PRIOR_BOUNDS["Omega_m"], size=n_prior),
+        np.random.uniform(*PRIOR_BOUNDS["S_8"],     size=n_prior),
+    ])
+    mc_prior = MCSamples(
+        samples=prior_samples,
+        names=["Omega_m", "S_8"],
+        labels=[r"\Omega_m", r"S_8"],
+        label="Prior",
+    )
+
+    n_plot = min(5, len(all_posterior_samples))
+    mc_list = [mc_prior]
+    for i in range(n_plot):
+        mc = MCSamples(
+            samples=all_posterior_samples[i],
+            names=["Omega_m", "S_8"],
+            labels=[r"\Omega_m", r"S_8"],
+            label=f"obs {i+1}",
+        )
+        mc_list.append(mc)
+
+    g = gdplots.get_subplot_plotter()
+    g.triangle_plot(mc_list, filled=False, legend_loc="upper right")
+    # Mark fiducial cosmology on all subplots
+    for ax in g.subplots.flat:
+        if ax is not None:
+            ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
+            ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+
+    plot_path = results_dir / "posterior_plot.png"
+    g.export(str(plot_path))
+    print(f"Posterior plot saved to {plot_path}")
+
+    wandb.log({
+        "fom_mean": fom_mean,
+        "fom_std": fom_std,
+        "best_val_nll": best_val_nll,
+        "best_seed/posterior_plot": wandb.Image(str(plot_path)),
+    })
+    wandb.finish()
 
     if vol is not None:
         vol.commit()
