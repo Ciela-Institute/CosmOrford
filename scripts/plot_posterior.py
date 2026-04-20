@@ -15,9 +15,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-FIDUCIAL = np.array([0.29022, 0.81345])  # Omega_m, S_8
-
-
 def plot_posteriors(npe_results_path: Path, output_path: str):
     all_results = []
     for d in sorted(npe_results_path.iterdir()):
@@ -41,6 +38,7 @@ def plot_posteriors(npe_results_path: Path, output_path: str):
 
     for i, r in enumerate(all_results):
         ax = axes[i]
+        theta_true = r["theta_true"]  # (2,)
         samples = r["samples"]  # (n_maps, n_samples, 2)
         n_maps = samples.shape[0]
                                                                                                                                                     
@@ -50,9 +48,9 @@ def plot_posteriors(npe_results_path: Path, output_path: str):
         ax.scatter(samples[0, :, 0], samples[0, :, 1],
                    alpha=0.02, s=1, color="C0", rasterized=True)
 
-        ax.axvline(FIDUCIAL[0], color="red", linewidth=1.5, linestyle="--")
-        ax.axhline(FIDUCIAL[1], color="red", linewidth=1.5, linestyle="--")
-        ax.plot(*FIDUCIAL, "r*", markersize=12, zorder=10)
+        ax.axvline(theta_true[0], color="red", linewidth=1.5, linestyle="--")
+        ax.axhline(theta_true[1], color="red", linewidth=1.5, linestyle="--")
+        ax.plot(*theta_true, "r*", markersize=12, zorder=10)
 
         ax.set_xlabel(r"$\Omega_m$", fontsize=12)
         ax.set_ylabel(r"$S_8$", fontsize=12)
