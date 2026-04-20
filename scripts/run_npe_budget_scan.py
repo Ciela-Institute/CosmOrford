@@ -279,9 +279,11 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     import numpy as np
     import torch
 
-    from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD, SURVEY_MASK
+    from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK
     from cosmoford.dataset import reshape_field_numpy
     from cosmoford.models_nopatch import build_flow
+
+    import os
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*60}")
@@ -418,8 +420,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
 
                 for _ in range(cfg.n_noise_realizations):
-                    # noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-                    noisy = kappa_reshaped * mask # kappa maps from the holdout dataset are already noisy
+                    noisy = kappa_reshaped # kappa maps from the holdout dataset are already noisy and masked
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
                     s = compressor.compress(x)  # (1, 8)
                     all_summaries.append(s.cpu())
@@ -475,11 +476,15 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.npe_batch_size)
 
     # ── 5. Train NPE (multiple seeds, keep best) ──
+    results_dir = npe_results_path / f"budget-{budget}"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     overall_best_nll = float("inf")
     overall_best_state = None
 
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
+
         torch.manual_seed(seed + 42)
         context_dim = summaries_tensor.shape[1]
         flow = build_flow(
@@ -504,6 +509,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 loss = -flow.log_prob(t_batch, context=s_batch).mean()
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
                 optimizer.step()
                 train_losses.append(loss.item())
             scheduler.step()
@@ -514,8 +520,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             with torch.no_grad():
                 for s_batch, t_batch in val_loader:
                     s_batch, t_batch = s_batch.to(device), t_batch.to(device)
-                    val_loss = -flow.log_prob(t_batch, context=s_batch).mean()
-                    val_losses.append(val_loss.item())
+                    val_losses.append(-flow.log_prob(t_batch, context=s_batch).mean().item())
 
             mean_train = np.mean(train_losses)
             mean_val = np.mean(val_losses)
@@ -593,8 +598,6 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         kappa_all_fom = kappa_all_fom[:cfg.n_fiducial_maps]
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
-    mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
-
     fom_values = []
     store_posteriors = cfg.save_posterior_samples or cfg.save_posterior_plots
     posterior_samples_norm = [] if store_posteriors else None
@@ -602,11 +605,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     with torch.no_grad():
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
-
-            # Single noisy observation
-            noise = np.random.randn(*kappa_reshaped.shape).astype(np.float32) * NOISE_STD
-            # noisy = (kappa_reshaped + noise) * mask
-            noisy = kappa_reshaped * mask # the holdout dataset is already noisy. 
+            noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
 
@@ -643,9 +642,6 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         )
 
     # ── 7. Save results ──
-    results_dir = npe_results_path / f"budget-{budget}"
-    results_dir.mkdir(parents=True, exist_ok=True)
-
     torch.save(best_state, results_dir / "npe_flow.pt")
 
     posterior_plot_files = []
