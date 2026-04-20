@@ -50,20 +50,35 @@ def _plot_core(npe_results_path: Path, output_path: str):
             f"(val_nll={r['best_val_nll']:.4f}, compressor={compressor})"
         )
 
+    budgets = np.array([r["budget"] for r in all_results])
+    fom_means = np.array([r["fom_mean"] for r in all_results])
+    fom_stds = np.array([r["fom_std"] for r in all_results])
+    val_nlls = np.array([r["best_val_nll"] for r in all_results])                                                                                                                                                
+    mse_means = np.array([r["mse_mean"] for r in all_results])                                                                                                                                                   
+    mse_stds = np.array([r["mse_std"] for r in all_results]) 
+
+    order = np.argsort(budgets)
+    budgets = budgets[order]                                                                                                                                                                                     
+    fom_means, fom_stds = fom_means[order], fom_stds[order]                                                                                                                                                      
+    val_nlls = val_nlls[order]                                                                                                                                                                                   
+    mse_means, mse_stds = mse_means[order], mse_stds[order] 
+
     groups = sorted(set(r.get("_run_group", "default") for r in all_results))
     fig, ax = plt.subplots(figsize=(8, 5))
     cmap = plt.cm.get_cmap("tab10", max(len(groups), 1))
     for idx, group in enumerate(groups):
         rows = [r for r in all_results if r.get("_run_group", "default") == group]
-        budgets = np.array([r["budget"] for r in rows])
-        fom_means = np.array([r["fom_mean"] for r in rows])
-        fom_stds = np.array([r["fom_std"] for r in rows])
-        order = np.argsort(budgets)
-        budgets, fom_means, fom_stds = budgets[order], fom_means[order], fom_stds[order]
+        group_budgets = np.array([r["budget"] for r in rows])
+        group_fom_means = np.array([r["fom_mean"] for r in rows])
+        group_fom_stds = np.array([r["fom_std"] for r in rows])
+        order = np.argsort(group_budgets)
+        group_budgets = group_budgets[order]
+        group_fom_means = group_fom_means[order]
+        group_fom_stds = group_fom_stds[order]
         ax.errorbar(
-            budgets,
-            fom_means,
-            yerr=fom_stds,
+            group_budgets,
+            group_fom_means,
+            yerr=group_fom_stds,
             fmt="o-",
             color=cmap(idx),
             markersize=6,
@@ -82,6 +97,53 @@ def _plot_core(npe_results_path: Path, output_path: str):
     ax.tick_params(labelsize=12)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))                                                                                                                                                                                                                                                                                                                                                                
+    axes[0].errorbar(budgets, fom_means, yerr=fom_stds,                                                                                                                                                          
+                        fmt="o-", color="C0", markersize=8, capsize=4, linewidth=1.5)                                                                                                                               
+    axes[0].set_xscale("log")                                                                                                                                                                                    
+    axes[0].set_xlabel("Simulation budget", fontsize=13)                                                                                                                                                         
+    axes[0].set_ylabel("Figure of Merit (FoM)", fontsize=13)                                                                                                                                                     
+    axes[0].set_title("FoM vs budget", fontsize=14)                                                                                                                                                              
+    axes[0].grid(True, alpha=0.3)                                                                                                                                                                                
+                                                                                                                                                                                                            
+    axes[1].plot(budgets, val_nlls, "o-", color="C1", markersize=8, linewidth=1.5)                                                                                                                               
+    axes[1].set_xscale("log")                                                                                                                                                                                    
+    axes[1].set_xlabel("Simulation budget", fontsize=13)                                                                                                                                                         
+    axes[1].set_ylabel("Best val NLL", fontsize=13)                                                                                                                                                              
+    axes[1].set_title("NPE val NLL vs budget", fontsize=14)                                                                                                                                                      
+    axes[1].grid(True, alpha=0.3)                                                                                                                                                                                
+                                                                                                                                                                                                            
+    axes[2].errorbar(budgets, mse_means, yerr=mse_stds,                                                                                                                                                          
+                        fmt="o-", color="C2", markersize=8, capsize=4, linewidth=1.5)                                                                                                                               
+    axes[2].set_xscale("log")                                                                                                                                                                                    
+    axes[2].set_xlabel("Simulation budget", fontsize=13)                                                                                                                                                         
+    axes[2].set_ylabel("MSE", fontsize=13)                                                                                                                                                                       
+    axes[2].set_title("Posterior MSE vs budget", fontsize=14)                                                                                                                                                    
+    axes[2].grid(True, alpha=0.3)                                                                                                                                                                                
+                                                                                                                                                                                                            
+    for ax in axes:                                                                                                                                                                                              
+        ax.tick_params(labelsize=11)  
+
+    fig.tight_layout()
+    fig.savefig(output_path.replace(".pdf", "_full.pdf"), dpi=150)
+    print(f"Plot saved to {output_path} and {output_path.replace('.pdf', '_full.pdf')}")      
+
+
+    # Saving data points for the plots above. 
+    if ".pdf" in output_path: 
+        output_path = output_path.split(".pdf")[0]
+    
+    np.savez(
+        output_path + ".npz",
+        budgets = budgets, 
+        fom_means = fom_means, 
+        fom_stds = fom_stds, 
+        mse_means = mse_means, 
+        mse_stds = mse_stds, 
+        val_nlls = val_nlls
+    )                                                                                                                                                                
+                                
 
 
 # ── Modal entry point (only loaded when invoked via `modal run`) ──────────────
@@ -125,3 +187,9 @@ if __name__ == "__main__":
 
     _plot_core(Path(args.experiments_dir) / "npe_results", args.output)
     print(f"Plot saved to {args.output}")
+
+    if ".pdf" in args.output: 
+        data_path = args.output.split(".pdf")[0]
+    else: 
+        data_path = args.output
+    print(f"Data points saved to {data_path}.npz")
