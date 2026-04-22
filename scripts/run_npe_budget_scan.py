@@ -115,7 +115,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None):
+def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None, normalize: bool = False):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -263,6 +263,14 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     s_val, t_val = summaries_tensor[val_idx], thetas_tensor[val_idx]
     print(f"Train: {n_train}, Val: {n_val}")
 
+    # Normalize summaries
+    if normalize:
+        s_mean = s_train.mean(dim=0, keepdim=True)
+        s_std = s_train.std(dim=0, keepdim=True).clamp(min=1e-6)
+        s_train = (s_train - s_mean) / s_std
+        s_val = (s_val - s_mean) / s_std
+        print(f"Normalized summaries (train mean/std): {s_mean.cpu().numpy()}, {s_std.cpu().numpy()}")
+
     train_dataset = torch.utils.data.TensorDataset(s_train, t_train)
     val_dataset = torch.utils.data.TensorDataset(s_val, t_val)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.npe_batch_size, shuffle=True)
@@ -367,17 +375,26 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     kappa_all_fom = np.array(holdout["kappa"])
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
+    theta_true_all = np.array(holdout["theta"])  # should all be the same for fiducial maps
+    assert np.allclose(theta_true_all, theta_true_all[0]), "All fiducial maps should have the same theta"
+    print(f"  Fiducial theta (raw): {theta_true_all[0]}")
+
     from cosmoford import SURVEY_MASK
     mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
     fom_values = []
+    mse_values = []
     all_posterior_samples = []  # (n_maps, n_posterior_samples, 2) in physical units
     with torch.no_grad():
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
-            noisy = kappa_reshaped
+            noisy = kappa_reshaped # kappa maps from the holdout dataset are already noisy and masked
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             s = compressor.compress(x)  # (1, 8)
+
+            # Normalize before feeding to flow
+            if normalize:
+                s = (s - s_mean.to(device)) / s_std.to(device)
 
             # Sample posterior
             samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
@@ -396,9 +413,18 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 fom = 0.0
             fom_values.append(fom)
 
+            # Compute MSE to cosmological parameters (for reference, not used in FoM)
+            theta_true = theta_true_all[0, :2]  # all fiducial maps have same theta
+            mse = np.mean((samples_phys - theta_true) ** 2)
+            mse_values.append(mse)
+    
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
+
+    mse_mean = np.mean(mse_values)
+    mse_std = np.std(mse_values)
+    print(f"  MSE = {mse_mean:.4f} ± {mse_std:.4f}")
 
     # ── 7. Save results ──
     torch.save(best_state, results_dir / "npe_flow.pt")
@@ -420,6 +446,10 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": cfg.n_posterior_samples,
         "compressor_checkpoint": ckpt_path,
+        "mse_mean": float(mse_mean),
+        "mse_std": float(mse_std),
+        "mse_values": [float(v) for v in mse_values],
+        "theta_true": theta_true_all[0, :2].tolist(),
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
@@ -603,6 +633,9 @@ if __name__ == "__main__":
                              "(overrides the budgets list in the config file)")
     parser.add_argument("--offline", help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
                              "is not found locally", type = bool)
+    parser.add_argument("--normalize",
+                        help="Whether to normalize summaries before training NPE (default: False)",
+                        type=bool, default=False)
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
@@ -620,4 +653,5 @@ if __name__ == "__main__":
             lambda split, ds=holdout_ds: ds[split],
             cfg,
             offline=args.offline,
+            normalize=args.normalize,
         )
