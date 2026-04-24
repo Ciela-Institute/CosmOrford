@@ -30,6 +30,7 @@ lightning_logs/
 
 # Generated outputs
 *.pdf
+*.png
 
 *.lock
 jobout/*
@@ -38,3 +39,5 @@ shell/jobout/*.out
 
 global_config.yaml
 budget-*
+
+*copy*

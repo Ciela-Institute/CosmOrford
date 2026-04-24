@@ -31,7 +31,7 @@ trainer:
   accelerator: gpu
   precision: "bf16-mixed"
   log_every_n_steps: 1
-  val_check_interval: 100
+  val_check_interval: 500
   check_val_every_n_epoch: null
   callbacks:
     - class_path: LearningRateMonitor

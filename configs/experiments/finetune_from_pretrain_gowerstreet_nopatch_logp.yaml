@@ -12,7 +12,7 @@ model:
     decay_every_epochs: 1
     dropout_rate: 0.1
     loss_type: "log_prob"
-    pretrained_checkpoint_path: "/home/jlinhart/links/scratch/wl_chall/gowerstreet/"
+    pretrained_checkpoint_path: "/home/jlinhart/links/scratch/wl_chall/pretrain_gowerstreet/checkpoints/last.ckpt"
     use_peft: false
     lora_r: 4
     lora_alpha: 8
