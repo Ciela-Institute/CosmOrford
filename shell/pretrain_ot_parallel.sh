@@ -7,6 +7,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --gpus-per-node=h100_40gb
 #SBATCH --job-name=pretrain_otlognormal
+#SBATCH --array=0-4
 #SBATCH --output=jobout/%x_%A_%a.out
 
 
@@ -26,7 +27,11 @@ export HF_HOME="~/links/scratch/cache"
 cd $WDIR
 DSET=ot_lognormal
 DSET_MODE=ot-lognormal
-BUDGET=100
+
+# Define your budget samples
+BUDGETS=(100 1000 5000 10000 20200) # CHANGE THIS ! 
+BUDGET=${BUDGETS[$SLURM_ARRAY_TASK_ID]}
+
 
 # We use dot notation to reach deep into the YAML structure
 uv run trainer fit \
