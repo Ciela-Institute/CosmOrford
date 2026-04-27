@@ -22,6 +22,7 @@ model:
     hos_l1_nbins: 80
     hos_l1_min_snr: -7.0
     hos_l1_max_snr: 7.0
+    use_fixed_normalization: true
 data:
   class_path: cosmoford.dataset.ChallengeDataModule
   init_args:
@@ -50,7 +51,7 @@ trainer:
     class_path: WandbLogger
     init_args:
       name: hos_npe_l1_ns4_budget20200
-      project: neurips-wl-challenge
+      project: neurips-wl-challenge-hos-compression
       entity: cosmostat
       tags:
       - hos-npe
