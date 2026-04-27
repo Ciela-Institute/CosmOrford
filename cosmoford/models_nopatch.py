@@ -140,6 +140,7 @@ class StatsCompressorNoPatch(L.LightningModule):
     lr_schedule: str = "step",
     total_steps: int = 0,
     n_val_noise: int = 1,
+    use_fixed_normalization: bool = False,
   ):
     super().__init__()
     self.save_hyperparameters()
@@ -221,6 +222,75 @@ class StatsCompressorNoPatch(L.LightningModule):
       nn.Linear(summary_dim * 4, 2 * 2),
     )
 
+  def on_train_start(self):
+    """Compute fixed normalization (mean/std) over the training set once.
+
+    This is a best-effort, synchronous pass over the training dataloader. It
+    registers `feature_mean` and `feature_std` buffers so that `_compute_stats`
+    can apply the same normalization at training and inference time.
+    """
+    if not getattr(self.hparams, "use_fixed_normalization", False):
+      return
+    # Don't recompute if buffers already present (e.g., loaded from checkpoint)
+    if hasattr(self, "feature_mean") and hasattr(self, "feature_std"):
+      return
+
+    # Resolve a training dataloader (best-effort across datamodule / trainer)
+    train_loader = None
+    try:
+      if hasattr(self, "trainer") and getattr(self.trainer, "datamodule", None) is not None:
+        train_loader = self.trainer.datamodule.train_dataloader()
+      else:
+        # Trainer may expose prepared dataloaders after setup
+        loaders = getattr(self.trainer, "train_dataloaders", None)
+        if loaders:
+          train_loader = loaders[0] if isinstance(loaders, (list, tuple)) else loaders
+    except Exception:
+      train_loader = None
+
+    if train_loader is None:
+      print("Warning: could not access train dataloader for fixed normalization; skipping.")
+      return
+
+    device = next(self.parameters()).device if any(True for _ in self.parameters()) else torch.device("cpu")
+
+    total = 0
+    sum_feat = None
+    sumsq_feat = None
+
+    # Evaluate model statistics without gradient tracking
+    was_training = self.training
+    self.eval()
+    with torch.no_grad():
+      for batch in train_loader:
+        # Expect batch to be (x, y) or x; handle both
+        x_batch = batch[0] if isinstance(batch, (list, tuple)) else batch
+        x_batch = x_batch.to(device)
+        feats = self._compute_stats(x_batch)
+        feats = feats.detach()
+        if sum_feat is None:
+          sum_feat = torch.zeros(feats.size(1), device=device)
+          sumsq_feat = torch.zeros(feats.size(1), device=device)
+        sum_feat += feats.sum(dim=0)
+        sumsq_feat += (feats ** 2).sum(dim=0)
+        total += feats.shape[0]
+    # Restore training mode
+    if was_training:
+      self.train()
+
+    if total == 0:
+      print("Warning: empty training dataloader; skipping fixed normalization.")
+      return
+
+    mean = sum_feat / total
+    var = (sumsq_feat / total) - mean ** 2
+    std = torch.sqrt(torch.clamp(var, min=0.0)) + 1e-8
+
+    # Register as persistent buffers so they are moved with the module/device
+    self.register_buffer("feature_mean", mean)
+    self.register_buffer("feature_std", std)
+    print(f"Registered fixed normalization buffers (dim={mean.numel()})")
+
   def _compute_stats(self, x):
     parts = []
     mask_reduced_t = torch.tensor(self.mask_reduced, device=x.device, dtype=x.dtype)
@@ -291,7 +361,13 @@ class StatsCompressorNoPatch(L.LightningModule):
         )
         parts.append(scat_features)
 
-    return torch.cat(parts, dim=1)
+    features = torch.cat(parts, dim=1)
+    if getattr(self.hparams, "use_fixed_normalization", False):
+      if hasattr(self, "feature_mean") and hasattr(self, "feature_std"):
+        mean = self.feature_mean.to(features.device).unsqueeze(0)
+        std = self.feature_std.to(features.device).unsqueeze(0)
+        features = (features - mean) / std
+    return features
 
   def forward(self, x):
     summaries = self.compress(x)
