@@ -15,7 +15,8 @@ data:
   init_args:
     batch_size: 128
     num_workers: 8
-    dataset_mode: "gowerstreet"
+    dataset_mode: "ot-lognormal"
+    ot_budget: 20200
 
 trainer:
   max_steps: 6000
@@ -41,5 +42,5 @@ trainer:
       name: "efficientnet_v2_s_logp"
       project: "neurips-wl-challenge"
       entity: "cosmostat"
-      save_dir: "/home/jlinhart/links/scratch/wl_chall/models/pretrain_gowerstreet"
+      save_dir: "/home/noedia/links/scratch/wl_chall/models/pretrain_gowerstreet"
       log_model: true
