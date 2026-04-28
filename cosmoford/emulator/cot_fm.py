@@ -402,7 +402,7 @@ def _run_pqm(model, label, seed, fig_path, chi2_key, plot_key, extra_log=None):
             pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
         maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
 
-        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=10)
+        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=100)
         fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
