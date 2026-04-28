@@ -6,7 +6,6 @@ import datasets
 from datasets import Dataset, Features, Array2D, Value, Sequence
 from cosmoford.emulator.torch_models import build_unet2d_condition_with_y
 import torch
-import wandb
 import yaml
 from cosmoford.emulator.neural_ode import solve_ode_forward
 from cosmoford.dataset import reshape_field_numpy, inverse_reshape_field_numpy
@@ -15,65 +14,23 @@ from cosmoford.emulator.utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--wandb_mode", type=str, default="disabled", choices=["online", "offline", "disabled"], help="wandb mode")
-parser.add_argument("--hf_path", type=str, default="/home/noedia/scratch/neurips_chall/lognormal_sims/hf_dataset/hf_lognormal_val", help="huggingface datasets local path")
-parser.add_argument("--wandb_path", type=str, default="/home/juzgh/projects/def-lplevass/juzgh/neurips-wl-challenge/cosmoford/emulator/wandb/offline-run-20251111_231739-ex2lzsk9/", help="wandb local path")
-parser.add_argument("--run_id", type=str, default="test_run", help="wandb run id")
-parser.add_argument(
-    "--output_dir",
-    type=str,
-    default="./data/",
-    help="Directory to save the generated dataset",
-)
-parser.add_argument(
-    "--chunk_size",
-    type=int,
-    default=50,
-    help="Chunk size for processing simulations",
-)
-parser.add_argument(
-    "--batch_size",
-    type=int,
-    default=50,
-    help="Batch size for processing simulations",
-)
-parser.add_argument(
-    "--unet_checkpoint",
-    type=str,
-    default="unet_FINAL.pth",
-    help="UNet checkpoint filename in wandb run",
-)
-parser.add_argument(
-    "--rtol",
-    type=float,
-    default=1e-2,
-    help="Relative tolerance for ODE solver",
-)
-parser.add_argument(
-    "--atol",
-    type=float,
-    default=1e-2,
-    help="Absolute tolerance for ODE solver",
-)
-parser.add_argument(
-    "--nb_steps",
-    type=int,
-    default=11,
-    help="Number of steps for ODE solver",
-)
-parser.add_argument(
-    '--fraction_of_logn_to_generate',
-    type=float,
-    default=1.0,
-    help="Fraction of lognormal dataset to generate",
-)
-parser.add_argument(
-    '--part_of_the_batched_dataset_to_generate',
-    type=int,
-    default=0,
-    help="Part of the batched dataset to generate",
-)
-args = parser.parse_args()
+parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
+parser.add_argument("--run_dir", type=str, default=None, help="Override: wandb offline run directory")
+parser.add_argument("--dataset_name", type=str, default=None, help="Override: output dataset name")
+cli = parser.parse_args()
+
+with open(cli.config) as f:
+    _cfg = yaml.safe_load(f)
+if cli.run_dir is not None:
+    _cfg["run_dir"] = cli.run_dir
+if cli.dataset_name is not None:
+    _cfg["dataset_name"] = cli.dataset_name
+args = argparse.Namespace(**_cfg)
+print("=== Config ===")
+for k, v in _cfg.items():
+    print(f"  {k}: {v}")
+print("==============")
+
 
 # log normal dataset
 dataset_lognormal = datasets.load_from_disk(args.hf_path)
@@ -98,31 +55,10 @@ print(
     f"fraction={fraction}, part={part_idx}/{n_parts-1}"
 )
 
-# load wandb model
-# Initialize WandB API
-if args.wandb_mode != "disabled":
-  api = wandb.Api()
-  wandb_entity = "cosmostat"
-  wandb_project = "neurips-wl-challenge"
-  wandb_run_id = args.run_id
-  run = api.run(f"{wandb_entity}/{wandb_project}/{wandb_run_id}")
-
-  # Download config and checkpoint files. These will be downloaded to the current working directory.
-  print("Downloading config_used.yaml...")
-  cfg_file = run.file("config_used.yaml")
-  cfg_path = Path(cfg_file.download(replace=True).name)
-
-  ckpt_file = run.file(f"checkpoints/{args.unet_checkpoint}")
-  ckpt_path = Path(ckpt_file.download(replace=True).name)
-
-  print(f"Downloaded config to: {cfg_path}")
-  print(f"Downloaded checkpoint to: {ckpt_path}")
-  # --- End WandB loading part ---
-
-else:
-  run_dir = Path(args.wandb_path)
-  cfg_path = run_dir / "files"/ "config_used.yaml"
-  ckpt_path = run_dir / "files"/  "checkpoints" / "unet_FINAL.pth"
+run_dir = Path(args.run_dir)
+cfg_path = run_dir / "files" / "config_used.yaml"
+ckpt_path = run_dir / "files" / "checkpoints" / args.unet_checkpoint
+print(f"Loading model from: {ckpt_path}")
 
 
 # 1. Reconstruct model from saved config
@@ -143,7 +79,7 @@ except TypeError: # Older PyTorch versions (e.g., < 1.10) may not support weight
 
 model.load_state_dict(state, strict=True)
 model.eval()
-print("Model loaded successfully from WandB!")
+print("Model loaded successfully!")
 
 def get_data(batch_logn):
         """Run model forward and return (theta, predicted_maps) with NumPy-first pipeline.
@@ -256,7 +192,7 @@ for chunk_idx in tqdm(range(num_chunks), desc="Processing chunks"):
 dataset = dataset.shuffle(seed=98)
 
 # Save the dataset
-save_path = str(Path(args.output_dir) / f"hf_emulated_dataset_{fraction}_part{part_idx}.hf")
+save_path = str(Path(args.output_dir) / args.dataset_name)
 dataset.save_to_disk(save_path)
 print(f"Dataset saved to: {save_path}")
 print("Done!")

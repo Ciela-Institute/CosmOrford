@@ -23,7 +23,6 @@ from cosmoford.emulator.utils import (
     apply_mask,
     iter_microbatches,
     pqm_evaluate,
-    sample_one_per_cosmology,
 )
 from cosmoford.emulator.neural_ode import solve_ode_forward
 
@@ -44,38 +43,17 @@ plt.rcParams.update({
 })
 
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--seed",
-    type=int,
-    default=42,
-    help="Random seed for initialization",
-)
-# Weights & Biases configuration
-parser.add_argument("--wandb_project", type=str, default="neurips-wl-challenge", help="wandb project name")
-parser.add_argument("--wandb_run_name", type=str, default=None, help="wandb run name (optional)")
-parser.add_argument("--wandb_entity", type=str, default="justinezgh", help="wandb entity (team/user), optional")
-parser.add_argument("--wandb_mode", type=str, default="offline", choices=["online", "offline", "disabled"], help="wandb mode")
-parser.add_argument("--disable_wandb", action="store_true", help="Disable wandb logging regardless of mode")
-parser.add_argument("--config_yaml", type=str, default=None, help="Path to UNet YAML config; overrides default if provided")
-# Optional overrides for training hyperparameters
-parser.add_argument("--eps", type=float, default=0.1, help="OT epsilon (override)")
-parser.add_argument("--num_epochs", type=int, default=50, help="Training epochs (override)")
-parser.add_argument("--batch_size", type=int, default=300, help="Batch size (override)")
-parser.add_argument("--sigma", type=float, default=0.001, help="Noise sigma (override)")
-parser.add_argument(
-    "--micro_batch_size",
-    type=int,
-    default=20,
-    help="Optional micro-batch size for inner loop; 0 disables micro-splitting",
-)
-parser.add_argument("--base_lr", type=float, default=5e-4, help="Base learning rate (override)")
-parser.add_argument("--gamma", type=float, default=0.9, help="Exponential LR decay factor (override)")
-parser.add_argument("--ot_reg", type=float, default=0.05, help="Sinkhorn regularization for GPU OT")
-parser.add_argument("--dataset_dir_nbody", type=str, default=None, help="Path to local neurips-wl-challenge-flat DatasetDict (load_from_disk); falls back to HF Hub if not set")
-parser.add_argument("--dataset_dir_logn_train", type=str, default=None, help="Path to lognormal training dataset")
-parser.add_argument("--dataset_dir_logn_val", type=str, default=None, help="Path to lognormal validation dataset")
+parser.add_argument("--exp_config", type=str, required=True, help="Path to experiment YAML")
+parser.add_argument("--sim_budget", type=int, default=None, help="Number of N-body simulations to train on (null = full dataset)")
+cli = parser.parse_args()
 
-args = parser.parse_args()
+with open(cli.exp_config) as f:
+    _cfg = yaml.safe_load(f)
+_cfg.pop("exp_name", None)
+
+_defaults = {"seed": 42}
+_defaults.update(_cfg)
+args = argparse.Namespace(**_defaults)
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
@@ -89,19 +67,30 @@ if args.dataset_dir_nbody is not None:
 else:
     dataset_nbody = load_dataset("cosmostat/neurips-wl-challenge-flat")
 dset_nbody = dataset_nbody.with_format('numpy')
-train_dataset_nbody = dset_nbody['train']
 test_dataset_nbody = dset_nbody['validation']
 
-dataset_lognormal = load_from_disk(args.dataset_dir_logn_train)
-if args.dataset_dir_logn_val is not None:
-    train_dataset_lognormal = dataset_lognormal.with_format('numpy')
-    test_dataset_lognormal = load_from_disk(args.dataset_dir_logn_val).with_format('numpy')
+# Subset N-body training set for simulation budget scan.
+# Use first N samples (range) to match the compressor budget scan convention.
+_train_nbody_full = dset_nbody['train']
+sim_budget = cli.sim_budget
+if sim_budget is not None:
+    _n_full = len(_train_nbody_full)
+    train_dataset_nbody = _train_nbody_full.select(range(sim_budget), keep_in_memory=True).with_format('numpy')
+    print(f"N-body budget: {sim_budget} / {_n_full} sims")
 else:
-    n = len(dataset_lognormal)
-    perm = np.random.default_rng(2).permutation(n).tolist()
-    n_test = int(0.2 * n)
-    train_dataset_lognormal = dataset_lognormal.select(perm[n_test:], keep_in_memory=True).with_format('numpy')
-    test_dataset_lognormal = dataset_lognormal.select(perm[:n_test], keep_in_memory=True).with_format('numpy')
+    train_dataset_nbody = _train_nbody_full
+
+# Sorted N-body dataset for PQMass: 256 entries × (101 cosmologies, H, W).
+# Each entry is one nuisance realization; the 101-axis gives unique cosmologies.
+# For fully i.i.d. samples we draw an independent nuisance index per cosmology.
+pqm_nbody_dataset = load_dataset("cosmostat/neurips-wl-challenge", split="train").with_format('numpy')
+
+dataset_lognormal = load_from_disk(args.dataset_dir_logn_train)
+n = len(dataset_lognormal)
+perm = np.random.default_rng(2).permutation(n).tolist()
+n_test = int(0.2 * n)
+train_dataset_lognormal = dataset_lognormal.select(perm[n_test:], keep_in_memory=True).with_format('numpy')
+test_dataset_lognormal = dataset_lognormal.select(perm[:n_test], keep_in_memory=True).with_format('numpy')
 
 print("train_dataset_lognormal", train_dataset_lognormal)
 print("test_dataset_lognormal", test_dataset_lognormal)
@@ -152,6 +141,7 @@ def sample_ot_plan(
     eps: float,
     device: torch.device,
     reg: float,
+    ot_method: str = "sinkhorn",
 ):
     x0_t = torch.from_numpy(x0.reshape(x0.shape[0], -1)).float().to(device)
     x1_t = torch.from_numpy(x1.reshape(x1.shape[0], -1)).float().to(device)
@@ -161,7 +151,13 @@ def sample_ot_plan(
     a = torch.full((n,), 1.0 / n, device=device, dtype=torch.float32)
     b = torch.full((m,), 1.0 / m, device=device, dtype=torch.float32)
     M = compute_cost_matrix(x0_t, x1_t, yx0_t, yx1_t, eps)
-    tp = ot.sinkhorn(a, b, M, reg=reg)
+    if ot_method == "emd":
+        # ot.emd requires CPU tensors (LP solver runs on CPU)
+        tp = ot.emd(a.cpu(), b.cpu(), M.cpu()).to(device)
+    else:
+        # sinkhorn_log: log-domain arithmetic, numerically stable for small reg
+        # numItermax=50000 ensures convergence at ot_reg=1e-3
+        tp = ot.sinkhorn(a, b, M, reg=reg, method="sinkhorn_log", numItermax=50000)
     return get_paired_data(tp.cpu().numpy(), n, rng)
 
 
@@ -170,7 +166,7 @@ print("--Define get sample--")
 def sample_time(n_samples: int, device: torch.device) -> torch.Tensor:
     return torch.rand(n_samples, 1, device=device)
 
-def get_ot_batch(batch, rng: np.random.Generator, eps: float, device: torch.device, ot_reg: float):
+def get_ot_batch(batch, rng: np.random.Generator, eps: float, device: torch.device, ot_reg: float, ot_method: str = "sinkhorn"):
     # Split parent RNG for independent, reproducible streams
     rng_pre, rng_x0, rng_x1, rng_plan = split_rng(rng, 4)
 
@@ -188,7 +184,7 @@ def get_ot_batch(batch, rng: np.random.Generator, eps: float, device: torch.devi
     x0, vmask0, hmask0 = augmentation_data_numpy(x0, rng_x0)
     x1, vmask1, hmask1 = augmentation_data_numpy(x1, rng_x1)
 
-    inds_x0, inds_x1 = sample_ot_plan(x0, x1, theta_x0, theta_x1, rng_plan, eps, device, ot_reg)
+    inds_x0, inds_x1 = sample_ot_plan(x0, x1, theta_x0, theta_x1, rng_plan, eps, device, ot_reg, ot_method=ot_method)
     x0_paired = x0[inds_x0]
     x1_paired = x1[inds_x1]
     theta_x0_paired = theta_x0[inds_x0]
@@ -291,15 +287,19 @@ print('--Init WandB--')
 # Initialize Weights & Biases (always enabled)
 run_suffix = f"{np.random.randint(100, 1000)}"
 auto_run_name = f"emulator_training_{run_suffix}"
-wandb_kwargs = dict(project=args.wandb_project, name=args.wandb_run_name or auto_run_name, config={
+_base_run_name = args.wandb_run_name or auto_run_name
+_run_name = f"{_base_run_name}/budget_{sim_budget}" if sim_budget is not None else _base_run_name
+wandb_kwargs = dict(project=args.wandb_project, name=_run_name, config={
     "eps": args.eps,
-    "num_epochs": args.num_epochs,
+    "max_steps": args.max_steps,
     "batch_size": args.batch_size,
     "sigma": args.sigma,
     "micro_batch_size": args.micro_batch_size,
     "base_lr": args.base_lr,
     "gamma": args.gamma,
     "ot_reg": args.ot_reg,
+    "ot_method": args.ot_method,
+    "sim_budget": sim_budget,
     "model_config": config,
     "config_source": config_source,
 })
@@ -349,29 +349,116 @@ try:
 except Exception:
     pass
 
+print('--PQMass evaluation--')
+
+def _run_pqm(model, label, seed, fig_path, chi2_key, plot_key, extra_log=None):
+    """PQMass evaluation with i.i.d. samples.
+
+    maps_ref: one map per cosmology from the sorted N-body dataset
+    (cosmostat/neurips-wl-challenge), with an independently drawn nuisance
+    index per cosmology to ensure full i.i.d.-ness.
+    maps_gen: ODE output on an independent random draw of lognormal maps
+    (no OT pairing) to keep the generated sample i.i.d.
+    """
+    try:
+        rng_pqm = np.random.default_rng(seed)
+
+        # Reference: one i.i.d. sample per cosmology from the sorted dataset.
+        # Each of the 256 entries has kappa shape (101, H, W); pick an
+        # independent nuisance index per cosmology.
+        n_nuisance = len(pqm_nbody_dataset)  # 256
+        n_cosmo = 101
+        nuisance_ids = rng_pqm.integers(0, n_nuisance, size=n_cosmo)
+        kappa_ref = np.stack([
+            pqm_nbody_dataset[int(k)]['kappa'][c]
+            for c, k in enumerate(nuisance_ids)
+        ])  # (101, H, W)
+        maps_ref = reshape_field_numpy(kappa_ref)  # (101, H_red, W_red)
+
+        # Generated: random lognormal inputs → ODE (no OT pairing).
+        # Draw 500 maps for better Voronoi cell coverage in PQMass.
+        n_gen = 500
+        ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, n_gen, seed + 1000)
+        batch_pqm_logn = next(ds_pqm_logn)
+        kappa_logn = np.array(batch_pqm_logn['kappa'])
+        theta_logn = np.array(batch_pqm_logn['theta'])
+        if kappa_logn.ndim == 4:  # (B, 10, H, W) — pick one map per sim
+            idx = rng_pqm.integers(0, kappa_logn.shape[1])
+            kappa_logn = kappa_logn[:, idx, :, :]
+            theta_logn = theta_logn[:, 1:]
+        x0_logn = reshape_field_numpy(kappa_logn)          # (B, H_red, W_red)
+        x0_t = torch.from_numpy(x0_logn[:, None, :, :]).float()
+        theta_t = torch.from_numpy(theta_logn).float()
+
+        pqm_chunks = []
+        for start in range(0, x0_t.shape[0], micro_bs):
+            with torch.no_grad():
+                pred_chunk = solve_ode_forward(
+                    x0_t[start:start + micro_bs].to(device),
+                    model,
+                    theta_t[start:start + micro_bs].to(device),
+                    device,
+                )
+            pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
+        maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
+
+        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=100)
+        fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log = {
+            chi2_key: float(np.mean(chi2_vals)),
+            plot_key: wandb.Image(str(fig_path), caption=f"PQMass N-body vs UNet ({label})"),
+        }
+        if extra_log:
+            log.update(extra_log)
+        wandb.log(log)
+        print(f"PQMass [{label}]: mean χ² = {np.mean(chi2_vals):.1f}")
+        return float(np.mean(chi2_vals))
+    except Exception as e:
+        print(f"PQMass [{label}] failed: {e}")
+        return None
+
+
+
 print('--Training--')
 
 eps = args.eps
-num_epochs = args.num_epochs
-batch_size = args.batch_size
+max_steps = args.max_steps
+batch_size = min(args.batch_size, len(train_dataset_nbody))
 sigma = args.sigma
 micro_bs = int(args.micro_batch_size)
 
-min_dataset_size = min(len(train_dataset_lognormal), len(train_dataset_nbody))
-num_training_steps_total = (min_dataset_size // micro_bs) * num_epochs
+num_training_steps_total = max_steps
 nb_checkpoints = num_training_steps_total // 5
+pqm_step_interval = max(1, num_training_steps_total // max(1, args.n_pqm_evals))
 step = 0
 best_val_loss = float('inf')
+best_pqm_chi2 = float('inf')
 
-for epoch in tqdm(range(num_epochs)):
+def _save_best_ckpt():
+    best_ckpt = str(ckpt_dir / "unet_best.pth")
+    torch.save(unet.state_dict(), best_ckpt)
+    try:
+        art = wandb.Artifact("unet-best", type="model")
+        art.add_file(best_ckpt)
+        wandb.log_artifact(art)
+    except Exception:
+        pass
+
+epoch = 0
+pbar = tqdm(total=max_steps, desc="training")
+while step < max_steps:
     ds_train_logn = get_iterable_dataset(train_dataset_lognormal, batch_size, int((epoch + 1) * 1000))
     ds_train_nbody = get_iterable_dataset(train_dataset_nbody, batch_size, epoch)
     rng_epoch = np.random.default_rng(args.seed + epoch)
 
     for batch_logn, batch_nbody in zip(ds_train_logn, ds_train_nbody):
-        batch = get_ot_batch([batch_logn, batch_nbody], rng_epoch, eps, device, args.ot_reg)
+        batch = get_ot_batch([batch_logn, batch_nbody], rng_epoch, eps, device, args.ot_reg, ot_method=args.ot_method)
 
         for mb in iter_microbatches(batch, micro_bs):
+            if step >= max_steps:
+                break
             loss = train_step(
                 unet,
                 optimizer,
@@ -382,6 +469,7 @@ for epoch in tqdm(range(num_epochs)):
                 sigma,
             )
             step += 1
+            pbar.update(1)
             wandb.log({
                 "train_loss": loss,
                 "learning_rate": optimizer.param_groups[0]['lr'],
@@ -396,7 +484,7 @@ for epoch in tqdm(range(num_epochs)):
                 ds_test_nbody = get_iterable_dataset(test_dataset_nbody, micro_bs, 0)
                 batch_lognormal = next(ds_test_lognormal)
                 batch_nbody = next(ds_test_nbody)
-                batch = get_ot_batch([batch_lognormal, batch_nbody], rng_eval, eps, device, args.ot_reg)
+                batch = get_ot_batch([batch_lognormal, batch_nbody], rng_eval, eps, device, args.ot_reg, ot_method=args.ot_method)
 
                 with torch.no_grad():
                     lt = flow_matching_loss(unet, batch['x0'], batch['x1'], batch['theta_x0'], batch['t'], sigma)
@@ -408,34 +496,16 @@ for epoch in tqdm(range(num_epochs)):
                     "epoch": epoch
                 })
 
-                if loss_t < best_val_loss:
+                if args.best_ckpt_metric == "val_loss" and loss_t < best_val_loss:
                     best_val_loss = loss_t
-                    best_ckpt = str(ckpt_dir / "unet_best.pth")
-                    torch.save(unet.state_dict(), best_ckpt)
-                    try:
-                        art = wandb.Artifact("unet-best", type="model")
-                        art.add_file(best_ckpt)
-                        wandb.log_artifact(art)
-                    except Exception:
-                        pass
+                    _save_best_ckpt()
 
             if step % nb_checkpoints == 0:
-                # Save and log checkpoint to wandb as an artifact
-                try:
-                    ckpt_path = str(ckpt_dir / f"unet_{epoch}.pth")
-                    # Ensure checkpoint exists on disk before adding to artifact
-                    torch.save(unet.state_dict(), ckpt_path)
-                    art = wandb.Artifact(f"unet-epoch-{epoch}", type="model")
-                    art.add_file(ckpt_path)
-                    wandb.log_artifact(art)
-                except Exception:
-                    pass
-                
                 ds_test_lognormal = get_iterable_dataset(test_dataset_lognormal, micro_bs, 0)
                 ds_test_nbody = get_iterable_dataset(test_dataset_nbody, micro_bs, 0)
                 batch_lognormal = next(ds_test_lognormal)
                 batch_nbody = next(ds_test_nbody)
-                batch_test = get_ot_batch([batch_lognormal, batch_nbody], rng_epoch, eps, device, args.ot_reg)
+                batch_test = get_ot_batch([batch_lognormal, batch_nbody], rng_epoch, eps, device, args.ot_reg, ot_method=args.ot_method)
 
                 x_1_pred = solve_ode_forward(batch_test['x0'], unet, batch_test['theta_x0'], device)
 
@@ -493,71 +563,39 @@ for epoch in tqdm(range(num_epochs)):
                     pass
                 plt.close(fig)
 
-                # PQMass evaluation: N-body vs UNet
-                # maps_ref: one random realization per cosmology from the N-body validation
-                # set. The NeurIPS WL Challenge dataset has 101 cosmologies × 256
-                # realizations; using more than one per cosmology would violate the i.i.d.
-                # assumption required by PQMass.
-                # maps_gen: ODE output on an independent random draw of lognormal maps
-                # (no OT pairing) to keep the generated sample i.i.d.
-                try:
-                    rng_pqm = np.random.default_rng(epoch)
+            # PQMass evaluation at its own interval (controls best-checkpoint tracking)
+            if step > 0 and step % pqm_step_interval == 0:
+                chi2_epoch = _run_pqm(
+                    unet, f"step {step}", step,
+                    fig_dir / f"pqm_unet_step_{step}.png",
+                    "pqm/chi2_unet_mean", "pqm/plot_unet",
+                    extra_log={"epoch": epoch},
+                )
+                if args.best_ckpt_metric == "pqm_chi2" and chi2_epoch is not None and chi2_epoch < best_pqm_chi2:
+                    best_pqm_chi2 = chi2_epoch
+                    _save_best_ckpt()
 
-                    # Reference: one sample per cosmology (≤101 i.i.d. samples)
-                    maps_ref, _ = sample_one_per_cosmology(test_dataset_nbody, rng_pqm)
-                    n_cosmo = len(maps_ref)
-
-                    # Generated: random lognormal inputs → ODE (no OT pairing)
-                    ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, n_cosmo, epoch + 1000)
-                    batch_pqm_logn = next(ds_pqm_logn)
-                    kappa_logn = np.array(batch_pqm_logn['kappa'])
-                    theta_logn = np.array(batch_pqm_logn['theta'])
-                    if kappa_logn.ndim == 4:  # (B, 10, H, W) — pick one map per sim
-                        idx = rng_pqm.integers(0, kappa_logn.shape[1])
-                        kappa_logn = kappa_logn[:, idx, :, :]
-                        theta_logn = theta_logn[:, 1:]
-                    x0_logn = reshape_field_numpy(kappa_logn)          # (B, H_red, W_red)
-                    x0_t = torch.from_numpy(x0_logn[:, None, :, :]).float()
-                    theta_t = torch.from_numpy(theta_logn).float()
-
-                    pqm_chunks = []
-                    for start in range(0, x0_t.shape[0], micro_bs):
-                        with torch.no_grad():
-                            pred_chunk = solve_ode_forward(
-                                x0_t[start:start + micro_bs].to(device),
-                                unet,
-                                theta_t[start:start + micro_bs].to(device),
-                                device,
-                            )
-                        pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
-                    maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
-
-                    # num_refs must be < min(N_ref, N_gen); 50 is safely below 101
-                    chi2_unet, fig_unet = pqm_evaluate(maps_ref, maps_gen, num_refs=50)
-                    fig_unet.suptitle(f"PQMass: N-body vs UNet (epoch {epoch})", fontsize=13)
-
-                    pqm_unet_path = fig_dir / f"pqm_unet_epoch_{epoch}.png"
-                    fig_unet.savefig(pqm_unet_path, dpi=150, bbox_inches="tight")
-                    plt.close(fig_unet)
-
-                    wandb.log({
-                        "pqm/chi2_unet_mean": float(np.mean(chi2_unet)),
-                        "pqm/plot_unet": wandb.Image(str(pqm_unet_path), caption=f"PQMass N-body vs UNet epoch {epoch}"),
-                        "epoch": epoch,
-                    })
-                except Exception as e:
-                    print(f"PQMass evaluation failed: {e}")
-
+    epoch += 1
+pbar.close()
 
 # Final trained model
 try:
     final_ckpt = str(ckpt_dir / "unet_FINAL.pth")
-    # Save final checkpoint to disk before logging
     torch.save(unet.state_dict(), final_ckpt)
     art = wandb.Artifact("unet-final", type="model")
     art.add_file(final_ckpt)
     wandb.log_artifact(art)
 except Exception:
     pass
+
+# Post-training PQMass: evaluate both last and best checkpoints on a fixed test set
+_run_pqm(unet, "last", 42, fig_dir / "pqm_final_last.png", "pqm/chi2_last_mean", "pqm/plot_last")
+
+best_ckpt_path = ckpt_dir / "unet_best.pth"
+if best_ckpt_path.exists():
+    unet_best = build_unet2d_condition_with_y(config).to(device)
+    unet_best.load_state_dict(torch.load(str(best_ckpt_path), map_location=device))
+    unet_best.eval()
+    _run_pqm(unet_best, "best", 42, fig_dir / "pqm_final_best.png", "pqm/chi2_best_mean", "pqm/plot_best")
 
 wandb.finish()
