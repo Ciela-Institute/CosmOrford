@@ -120,14 +120,7 @@ def power_spectrum_batch(x, pixsize=2. / 60 / 180 * np.pi, kedge=np.logspace(2, 
     power = power[:, 1:nk+1]# Exclude DC bin
 
     if normalize:
-        # Normalize per-batch (consistent with HOS/scattering normalization).
-        # LOG_PS_MEAN/STD were computed on noiseless maps; using them on noisy
-        # maps causes +1 to +4 sigma bias at high-k (noise-dominated) bins.
-        log_power = torch.log10(power + 1e-30)
-        mean = log_power.mean(dim=0, keepdim=True)
-        std = log_power.std(dim=0, keepdim=True, unbiased=False) + 1e-8
-        log_power = (log_power - mean) / std
-        power = log_power
+        power = torch.log10(power + 1e-30)
 
     return power_k, power
 
@@ -211,9 +204,6 @@ def compute_wavelet_peaks_batch(x, noise_std, mask=None, n_scales=5,
 
     if normalize:
         all_features = torch.log10(all_features + 1.0)
-        mean = all_features.mean(dim=0, keepdim=True)
-        std = all_features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
-        all_features = (all_features - mean) / std
 
     return all_features.to(dtype=dtype)
 
@@ -297,9 +287,6 @@ def compute_wavelet_l1_norms_batch(x, noise_std, mask=None, n_scales=5,
 
     if normalize:
         all_features = torch.log10(all_features + 1.0)
-        mean = all_features.mean(dim=0, keepdim=True)
-        std = all_features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
-        all_features = (all_features - mean) / std
 
     return all_features.to(dtype=dtype)
 
@@ -414,9 +401,6 @@ def compute_higher_order_statistics_batch(x, noise_std, mask=None, n_scales=5,
 
     if normalize:
         all_features = torch.log10(all_features + 1.0)
-        mean = all_features.mean(dim=0, keepdim=True)
-        std = all_features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
-        all_features = (all_features - mean) / std
 
     return all_features.to(dtype=dtype)
 
@@ -596,12 +580,8 @@ def compute_scattering_batch(
             f"Invalid normalization='{normalization}'. Expected one of {sorted(valid_norms)}."
         )
 
-    if normalize and normalization != "none":
-        if normalization == "log1p_zscore":
-            features = torch.log1p(features)
-        mean = features.mean(dim=0, keepdim=True)
-        std = features.std(dim=0, keepdim=True, unbiased=False) + 1e-8
-        features = (features - mean) / std
+    if normalize and normalization == "log1p_zscore":
+        features = torch.log1p(features)
 
     if not torch.isfinite(features).all():
         raise RuntimeError("Non-finite scattering features detected after pooling/normalization.")
