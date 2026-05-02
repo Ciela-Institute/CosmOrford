@@ -1,0 +1,34 @@
+budgets:
+- 20200
+compressor_class_path: cosmoford.models_nopatch.StatsCompressorNoPatch
+checkpoint_metric_name: val_log_prob
+checkpoint_mode: min
+wandb_entity: cosmostat
+wandb_project: neurips-wl-challenge-hos-compression
+wandb_budget_tag: hos-npe-hos_scat_J4
+log_npe_to_wandb: true
+wandb_npe_entity: cosmostat
+wandb_npe_project: neurips-wl-challenge-hos-npe
+wandb_npe_tags:
+- hos-npe
+- hos_scat_J4
+- compressed
+- smallflow
+wandb_npe_log_images: true
+n_noise_realizations: 1
+n_holdout_train_maps: 0
+npe_epochs: 100
+npe_lr: 0.001
+npe_batch_size: 512
+npe_patience: 5
+npe_seeds: 5
+flow_transforms: 2
+flow_hidden_dim: 64
+normalize_context: true
+use_raw_stats_context: false
+n_posterior_samples: 10000
+n_fiducial_maps: 10
+save_posterior_samples: true
+save_posterior_plots: true
+posterior_plot_bins: 80
+use_getdist_contours: true
