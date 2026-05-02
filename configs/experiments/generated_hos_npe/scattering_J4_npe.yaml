@@ -4,9 +4,19 @@ compressor_class_path: cosmoford.models_nopatch.StatsCompressorNoPatch
 checkpoint_metric_name: val_log_prob
 checkpoint_mode: min
 wandb_entity: cosmostat
-wandb_project: neurips-wl-challenge
+wandb_project: neurips-wl-challenge-hos-compression
 wandb_budget_tag: hos-npe-scattering_J4
-n_noise_realizations: 16
+log_npe_to_wandb: true
+wandb_npe_entity: cosmostat
+wandb_npe_project: neurips-wl-challenge-hos-npe
+wandb_npe_tags:
+- hos-npe
+- ablation-transfer
+- scattering_J4
+- inference
+wandb_npe_log_images: true
+n_noise_realizations: 1
+n_holdout_train_maps: 0
 npe_epochs: 500
 npe_lr: 0.001
 npe_batch_size: 512
@@ -19,3 +29,4 @@ n_fiducial_maps: 10
 save_posterior_samples: true
 save_posterior_plots: true
 posterior_plot_bins: 80
+use_getdist_contours: true

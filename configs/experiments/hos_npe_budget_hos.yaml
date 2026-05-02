@@ -14,7 +14,7 @@ wandb_npe_project: "neurips-wl-challenge-hos-npe"
 wandb_npe_tags: ["hos-npe", "hos", "inference"]
 wandb_npe_log_images: true
 
-n_noise_realizations: 16
+n_noise_realizations: 1
 
 npe_epochs: 500
 npe_lr: 1.0e-3

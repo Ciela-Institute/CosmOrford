@@ -50,7 +50,7 @@ trainer:
     class_path: WandbLogger
     init_args:
       name: hos_npe_ps_l1_fixed_budget20200
-      project: neurips-wl-challenge
+      project: neurips-wl-challenge-hos-compression
       entity: cosmostat
       tags:
       - hos-npe

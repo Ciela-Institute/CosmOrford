@@ -8,6 +8,7 @@ model:
     use_ps: true
     use_hos: false
     use_scattering: false
+    use_fixed_normalization: true
     augment_flip: false
     augment_shift: false
     warmup_steps: 500
@@ -45,7 +46,7 @@ trainer:
     class_path: WandbLogger
     init_args:
       name: hos_npe_ps_fixed_budget20200
-      project: neurips-wl-challenge
+      project: neurips-wl-challenge-hos-compression
       entity: cosmostat
       tags:
       - hos-npe
