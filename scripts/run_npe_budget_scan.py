@@ -2,7 +2,7 @@
 
 For each budget checkpoint from the compressor budget scan:
 1. Load frozen compressor
-2. Pre-compute summaries with noise augmentation on holdout data
+2. Pre-compute summaries from holdout data (already noisy; no extra noise)
 3. Train NPE (conditional MAF) on (summary, theta) pairs
 4. Evaluate FoM at fiducial cosmology
 
@@ -31,6 +31,7 @@ from glob import glob
 import importlib
 import os
 import re
+import shutil
 
 
 @dataclass
@@ -47,17 +48,22 @@ class NPEConfig:
     wandb_npe_project: str = "neurips-wl-challenge-hos-npe"
     wandb_npe_tags: List[str] = field(default_factory=lambda: ["hos-npe", "inference"])
     wandb_npe_log_images: bool = True
+    wandb_npe_log_model_paths: bool = True
     n_noise_realizations: int = 1
     n_holdout_train_maps: int = 0  # 0 means "use all"
     npe_epochs: int = 500
     npe_lr: float = 1e-3
     npe_batch_size: int = 512
-    npe_patience: int = 50
+    npe_patience: int = 5
     npe_seeds: int = 5
     flow_transforms: int = 4
     flow_hidden_dim: int = 64
+    normalize_context: bool = False
+    use_raw_stats_context: bool = False
     n_posterior_samples: int = 10_000
     n_fiducial_maps: int = 0  # 0 means "use all"
+    save_npe_seed_checkpoints: bool = True
+    save_npe_seed_training_summary: bool = True
     save_posterior_samples: bool = True
     save_posterior_plots: bool = True
     posterior_plot_bins: int = 80
@@ -290,6 +296,12 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     print(f"Budget {budget}: starting NPE pipeline")
     print(f"{'='*60}")
     print(f"Config: {cfg}")
+    if cfg.npe_seeds <= 0:
+        raise ValueError(f"npe_seeds must be > 0, got {cfg.npe_seeds}")
+    if cfg.npe_epochs <= 0:
+        raise ValueError(f"npe_epochs must be > 0, got {cfg.npe_epochs}")
+    if cfg.npe_batch_size <= 0:
+        raise ValueError(f"npe_batch_size must be > 0, got {cfg.npe_batch_size}")
 
     if vol is not None:
         vol.reload()
@@ -323,15 +335,19 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 "npe_seeds": int(cfg.npe_seeds),
                 "flow_transforms": int(cfg.flow_transforms),
                 "flow_hidden_dim": int(cfg.flow_hidden_dim),
+                "use_raw_stats_context": bool(cfg.use_raw_stats_context),
                 "n_posterior_samples": int(cfg.n_posterior_samples),
                 "n_fiducial_maps": int(cfg.n_fiducial_maps),
+                "save_npe_seed_checkpoints": bool(cfg.save_npe_seed_checkpoints),
+                "save_npe_seed_training_summary": bool(cfg.save_npe_seed_training_summary),
             },
         )
 
     # ── 1-3. Load or compute summaries ──
     class_tag = cfg.compressor_class_path.split(".")[-1]
     checkpoints_tag = checkpoints_path.name or "checkpoints"
-    cache_dir = summaries_cache_path / checkpoints_tag / class_tag / f"budget-{budget}"
+    context_tag = "rawstats" if cfg.use_raw_stats_context else "compressed"
+    cache_dir = summaries_cache_path / checkpoints_tag / class_tag / context_tag / f"budget-{budget}"
     cache_file = cache_dir / f"summaries_n{cfg.n_noise_realizations}.pt"
     compressor = None  # loaded lazily for FoM eval
     compressor_cls = _load_class(cfg.compressor_class_path)
@@ -343,10 +359,12 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         cache_class = cached.get("compressor_class_path")
         cache_metric = cached.get("checkpoint_metric_name")
         cache_mode = cached.get("checkpoint_mode")
+        cache_raw_stats = bool(cached.get("use_raw_stats_context", False))
         if (
             cache_class != cfg.compressor_class_path
             or cache_metric != cfg.checkpoint_metric_name
             or cache_mode != cfg.checkpoint_mode
+            or cache_raw_stats != bool(cfg.use_raw_stats_context)
         ):
             print(
                 "Cached summaries are incompatible with current compressor/metric settings; "
@@ -361,7 +379,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         ckpt_path = cached["compressor_checkpoint"]
         print(
             f"Loaded {summaries_tensor.shape[0]} cached pairs "
-            f"(compressor: {ckpt_path}, class: {cfg.compressor_class_path})"
+            f"(compressor: {ckpt_path}, class: {cfg.compressor_class_path}, "
+            f"context_mode: {context_tag})"
         )
     if not use_cache:
         print("No cached summaries found, computing from scratch...")
@@ -383,6 +402,11 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         for p in compressor.parameters():
             p.requires_grad = False
         print(f"Loaded compressor from {ckpt_path} ({cfg.compressor_class_path})")
+        if cfg.use_raw_stats_context and not hasattr(compressor, "_compute_stats"):
+            raise AttributeError(
+                "use_raw_stats_context=True requires compressor class to expose _compute_stats(x). "
+                f"Got class {cfg.compressor_class_path} without that method."
+            )
 
         # ── 2. Load holdout dataset ──
         print("Loading holdout dataset...")
@@ -409,8 +433,11 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         # Build reduced mask (same reshaped geometry as dataloader input)
         mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
-        # ── 3. Pre-compute summaries with noise augmentation ──
-        print(f"Pre-computing summaries ({cfg.n_noise_realizations} noise realizations per map)...")
+        # ── 3. Pre-compute summaries (holdout maps already include noise) ──
+        print(
+            "Pre-computing summaries "
+            f"({cfg.n_noise_realizations} realizations per map; no extra synthetic noise)..."
+        )
         all_summaries = []
         all_thetas = []
 
@@ -420,9 +447,13 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
 
                 for _ in range(cfg.n_noise_realizations):
-                    noisy = kappa_reshaped # kappa maps from the holdout dataset are already noisy and masked
+                    # Holdout train maps are already noisy; do not add synthetic noise again.
+                    noisy = kappa_reshaped
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
-                    s = compressor.compress(x)  # (1, 8)
+                    if cfg.use_raw_stats_context:
+                        s = compressor._compute_stats(x)
+                    else:
+                        s = compressor.compress(x)
                     all_summaries.append(s.cpu())
                     all_thetas.append(theta_norm[i])
 
@@ -445,6 +476,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 "compressor_class_path": cfg.compressor_class_path,
                 "checkpoint_metric_name": cfg.checkpoint_metric_name,
                 "checkpoint_mode": cfg.checkpoint_mode,
+                "use_raw_stats_context": bool(cfg.use_raw_stats_context),
                 "n_noise_realizations": cfg.n_noise_realizations,
             },
             cache_file,
@@ -470,17 +502,69 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     s_val, t_val = summaries_tensor[val_idx], thetas_tensor[val_idx]
     print(f"Train: {n_train}, Val: {n_val}")
 
+    results_dir = npe_results_path / f"budget-{budget}"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── 4b. Compressor linear probe (precision vs truth) ──
+    try:
+        from sklearn.linear_model import Ridge
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        s_tr_np = s_train.cpu().numpy()
+        s_va_np = s_val.cpu().numpy()
+        t_tr_np = t_train.cpu().numpy()
+        t_va_np = t_val.cpu().numpy()
+
+        probe = Ridge(alpha=1e-3).fit(s_tr_np, t_tr_np)
+        t_pred_norm = probe.predict(s_va_np)
+
+        t_pred_phys = t_pred_norm * THETA_STD[:2] + THETA_MEAN[:2]
+        t_true_phys = t_va_np * THETA_STD[:2] + THETA_MEAN[:2]
+
+        param_labels = [r"$\Omega_m$", r"$S_8$"]
+        fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+        for i, (ax, lbl) in enumerate(zip(axes, param_labels)):
+            lo = min(t_true_phys[:, i].min(), t_pred_phys[:, i].min())
+            hi = max(t_true_phys[:, i].max(), t_pred_phys[:, i].max())
+            ax.scatter(t_true_phys[:, i], t_pred_phys[:, i], s=2, alpha=0.3)
+            ax.plot([lo, hi], [lo, hi], "r--", lw=1.2, label="y = x")
+            ax.set_xlabel(f"True {lbl}")
+            ax.set_ylabel(f"Predicted {lbl}")
+            ax.legend(fontsize=8)
+        fig.suptitle(f"Compressor linear probe – budget {budget}")
+        fig.tight_layout()
+        probe_plot_path = results_dir / "compressor_linear_probe.png"
+        fig.savefig(probe_plot_path, dpi=120)
+        plt.close(fig)
+        print(f"Saved compressor precision-vs-truth plot: {probe_plot_path}")
+    except Exception as e:
+        print(f"Warning: compressor linear probe plot failed ({e})")
+
+    context_mean = None
+    context_std = None
+    if cfg.normalize_context:
+        context_mean = s_train.mean(dim=0, keepdim=True)
+        context_std = s_train.std(dim=0, keepdim=True).clamp_min(1e-6)
+        s_train = (s_train - context_mean) / context_std
+        s_val = (s_val - context_mean) / context_std
+        print("Applied NPE context normalization from training summaries.")
+
     train_dataset = torch.utils.data.TensorDataset(s_train, t_train)
     val_dataset = torch.utils.data.TensorDataset(s_val, t_val)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.npe_batch_size, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.npe_batch_size)
 
     # ── 5. Train NPE (multiple seeds, keep best) ──
-    results_dir = npe_results_path / f"budget-{budget}"
-    results_dir.mkdir(parents=True, exist_ok=True)
 
     overall_best_nll = float("inf")
     overall_best_state = None
+    seed_ckpt_files = []
+    seed_best_val_nlls = []
+    seed_epoch_counts = []
+    training_history = []
+    npe_curve_rows = []
 
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
@@ -499,6 +583,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         best_val_nll = float("inf")
         patience_counter = 0
         best_state = None
+        seed_ckpt_name = None
+        epochs_trained = 0
 
         for epoch in range(cfg.npe_epochs):
             # Train
@@ -524,6 +610,14 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
             mean_train = np.mean(train_losses)
             mean_val = np.mean(val_losses)
+            npe_curve_rows.append(
+                {
+                    "seed_index": int(seed),
+                    "epoch": int(epoch + 1),
+                    "train_nll": float(mean_train),
+                    "val_nll": float(mean_val),
+                }
+            )
 
             if mean_val < best_val_nll:
                 best_val_nll = mean_val
@@ -547,9 +641,27 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                     }
                 )
 
+            epochs_trained = int(epoch + 1)
             if patience_counter >= cfg.npe_patience:
                 print(f"  Early stopping at epoch {epoch+1}")
                 break
+
+        seed_epoch_counts.append(epochs_trained)
+        seed_best_val_nlls.append(float(best_val_nll))
+        if cfg.save_npe_seed_checkpoints and best_state is not None:
+            seed_ckpt_name = f"npe_flow_seed{seed:02d}_best.pt"
+            seed_ckpt_path = results_dir / seed_ckpt_name
+            torch.save(best_state, seed_ckpt_path)
+            seed_ckpt_files.append(seed_ckpt_name)
+        if cfg.save_npe_seed_training_summary:
+            training_history.append(
+                {
+                    "seed_index": int(seed),
+                    "best_val_nll": float(best_val_nll),
+                    "epochs_trained": epochs_trained,
+                    "best_checkpoint_file": seed_ckpt_name,
+                }
+            )
 
         print(f"  Seed {seed+1} best val NLL: {best_val_nll:.4f}")
         if wandb_run is not None:
@@ -557,6 +669,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 {
                     "npe/seed_index": int(seed),
                     "npe/seed_best_val_nll": float(best_val_nll),
+                    "npe/seed_epochs_trained": int(epochs_trained),
                 }
             )
         if best_val_nll < overall_best_nll:
@@ -574,9 +687,53 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     flow.load_state_dict(overall_best_state)
     flow.eval()
     best_val_nll = overall_best_nll
-    print(f"\nOverall best val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f}")
+    print(f"\n✓ Restored overall best model from seed with val_nll={best_val_nll:.4f}")
+    print(f"Overall best val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f}")
     if wandb_run is not None:
         wandb_run.log({"npe/best_val_nll_overall": float(best_val_nll)})
+
+    npe_learning_curve_plot_file = None
+    if npe_curve_rows:
+        curves_csv_path = results_dir / "npe_learning_curves.csv"
+        with curves_csv_path.open("w") as f:
+            f.write("seed_index,epoch,train_nll,val_nll\n")
+            for row in npe_curve_rows:
+                f.write(
+                    f"{row['seed_index']},{row['epoch']},{row['train_nll']:.8f},{row['val_nll']:.8f}\n"
+                )
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+            for seed in range(cfg.npe_seeds):
+                seed_rows = [r for r in npe_curve_rows if r["seed_index"] == seed]
+                if not seed_rows:
+                    continue
+                epochs = [r["epoch"] for r in seed_rows]
+                train_vals = [r["train_nll"] for r in seed_rows]
+                val_vals = [r["val_nll"] for r in seed_rows]
+                axes[0].plot(epochs, train_vals, linewidth=1.4, label=f"seed {seed+1}")
+                axes[1].plot(epochs, val_vals, linewidth=1.4, label=f"seed {seed+1}")
+
+            axes[0].set_title("NPE train NLL")
+            axes[1].set_title("NPE val NLL")
+            for ax in axes:
+                ax.set_xlabel("Epoch")
+                ax.set_ylabel("NLL")
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=8)
+            fig.suptitle(f"NPE learning curves – budget {budget}")
+            fig.tight_layout()
+            npe_learning_curve_plot_file = "npe_learning_curves.png"
+            npe_learning_curve_plot_path = results_dir / npe_learning_curve_plot_file
+            fig.savefig(npe_learning_curve_plot_path, dpi=130)
+            plt.close(fig)
+            print(f"Saved NPE learning curves plot: {npe_learning_curve_plot_path}")
+        except Exception as e:
+            print(f"Warning: NPE learning curves plot failed ({e})")
 
     # ── 6. Compute FoM at fiducial cosmology ──
     print("Computing FoM (all fiducial maps)...")
@@ -588,6 +745,11 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         compressor.to(device)
         for p in compressor.parameters():
             p.requires_grad = False
+    if cfg.use_raw_stats_context and not hasattr(compressor, "_compute_stats"):
+        raise AttributeError(
+            "use_raw_stats_context=True requires compressor class to expose _compute_stats(x). "
+            f"Got class {cfg.compressor_class_path} without that method."
+        )
 
     # Load fiducial kappa maps directly (split='fiducial' contains only fiducial cosmology maps)
     print("Loading fiducial maps for FoM evaluation...")
@@ -605,9 +767,15 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     with torch.no_grad():
         for kappa_i in kappa_all_fom:
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
+            # Holdout fiducial maps are already noisy; do not add synthetic noise again.
             noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
-            s = compressor.compress(x)  # (1, 8)
+            if cfg.use_raw_stats_context:
+                s = compressor._compute_stats(x)
+            else:
+                s = compressor.compress(x)
+            if context_mean is not None and context_std is not None:
+                s = (s - context_mean.to(device)) / context_std.to(device)
 
             # Sample posterior
             samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
@@ -642,10 +810,24 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         )
 
     # ── 7. Save results ──
+    if best_state is None:
+        raise RuntimeError("No NPE best state found; training did not produce a checkpoint")
     torch.save(best_state, results_dir / "npe_flow.pt")
+    seed_training_summary_file = None
+    if cfg.save_npe_seed_training_summary:
+        seed_training_summary_file = "npe_seed_training_summary.json"
+        (results_dir / seed_training_summary_file).write_text(json.dumps(training_history, indent=2))
 
     posterior_plot_files = []
     posterior_contour_files = []
+    compressor_learning_curve_file = None
+    compressor_curve_src = checkpoints_path / f"budget-{budget}" / "compressor_learning_curves.png"
+    if compressor_curve_src.exists():
+        compressor_learning_curve_file = "compressor_learning_curves.png"
+        compressor_curve_dst = results_dir / compressor_learning_curve_file
+        shutil.copy2(compressor_curve_src, compressor_curve_dst)
+        print(f"Copied compressor learning curves plot: {compressor_curve_dst}")
+
     if store_posteriors:
         posterior_samples_norm = np.stack(posterior_samples_norm, axis=0)
         posterior_samples_phys = np.stack(posterior_samples_phys, axis=0)
@@ -659,14 +841,6 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
         if cfg.save_posterior_plots:
             for obs_idx, samples_phys_obs in enumerate(posterior_samples_phys):
-                out_plot = results_dir / f"posterior_fiducial_obs{obs_idx:02d}.png"
-                _save_posterior_plot(
-                    samples_phys_obs,
-                    out_plot,
-                    bins=cfg.posterior_plot_bins,
-                    title=f"Posterior (fiducial realization {obs_idx})",
-                )
-                posterior_plot_files.append(out_plot.name)
                 out_contour = results_dir / f"posterior_fiducial_obs{obs_idx:02d}_contour.png"
                 if cfg.use_getdist_contours:
                     _save_getdist_contour_plot(
@@ -682,15 +856,21 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                         title=f"Posterior contours (fiducial realization {obs_idx})",
                     )
                 posterior_contour_files.append(out_contour.name)
-            print(f"Saved {len(posterior_plot_files)} posterior plot(s) to {results_dir}")
+            print(f"Saved {len(posterior_contour_files)} posterior contour plot(s) to {results_dir}")
     if wandb_run is not None and cfg.wandb_npe_log_images and cfg.save_posterior_plots:
         import wandb
 
         image_payload = {}
-        for obs_idx, fname in enumerate(posterior_plot_files):
-            image_payload[f"posterior/density_obs{obs_idx:02d}"] = wandb.Image(str(results_dir / fname))
         for obs_idx, fname in enumerate(posterior_contour_files):
             image_payload[f"posterior/contour_obs{obs_idx:02d}"] = wandb.Image(str(results_dir / fname))
+        if npe_learning_curve_plot_file is not None:
+            image_payload["npe/learning_curves"] = wandb.Image(
+                str(results_dir / npe_learning_curve_plot_file)
+            )
+        if compressor_learning_curve_file is not None:
+            image_payload["compressor/learning_curves"] = wandb.Image(
+                str(results_dir / compressor_learning_curve_file)
+            )
         if image_payload:
             wandb_run.log(image_payload)
 
@@ -705,15 +885,29 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "checkpoint_mode": cfg.checkpoint_mode,
         "flow_transforms": cfg.flow_transforms,
         "flow_hidden_dim": cfg.flow_hidden_dim,
+        "normalize_context": bool(cfg.normalize_context),
+        "use_raw_stats_context": bool(cfg.use_raw_stats_context),
         "n_noise_realizations": cfg.n_noise_realizations,
         "n_holdout_train_maps_used": int(n_maps),
         "n_holdout_train_maps_requested": int(cfg.n_holdout_train_maps),
         "n_fiducial_maps": len(kappa_all_fom),
         "n_fiducial_maps_requested": int(cfg.n_fiducial_maps),
         "n_posterior_samples": cfg.n_posterior_samples,
+        "npe_seeds": int(cfg.npe_seeds),
+        "npe_seed_best_val_nlls": seed_best_val_nlls,
+        "npe_seed_epochs_trained": seed_epoch_counts,
         "compressor_checkpoint": ckpt_path,
+        "npe_overall_best_state_file": "npe_flow.pt",
+        "npe_seed_checkpoint_files": seed_ckpt_files if cfg.save_npe_seed_checkpoints else [],
+        "npe_seed_training_summary": training_history if cfg.save_npe_seed_training_summary else [],
+        "npe_seed_training_summary_file": seed_training_summary_file,
+        "npe_learning_curves_csv_file": "npe_learning_curves.csv" if npe_curve_rows else None,
+        "npe_learning_curves_plot_file": npe_learning_curve_plot_file,
+        "compressor_learning_curves_plot_file": compressor_learning_curve_file,
         "save_posterior_samples": bool(cfg.save_posterior_samples),
         "save_posterior_plots": bool(cfg.save_posterior_plots),
+        "save_npe_seed_checkpoints": bool(cfg.save_npe_seed_checkpoints),
+        "save_npe_seed_training_summary": bool(cfg.save_npe_seed_training_summary),
         "posterior_contour_backend": "getdist" if cfg.use_getdist_contours else "hist2d",
         "posterior_samples_norm_file": "posterior_samples_norm.npy" if cfg.save_posterior_samples else None,
         "posterior_samples_phys_file": "posterior_samples_phys.npy" if cfg.save_posterior_samples else None,
@@ -727,6 +921,33 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         wandb_run.summary["fom_mean"] = float(fom_mean)
         wandb_run.summary["fom_std"] = float(fom_std)
         wandb_run.summary["best_val_nll"] = float(best_val_nll)
+        wandb_run.summary["npe_overall_best_state_file"] = "npe_flow.pt"
+        wandb_run.summary["npe_seed_checkpoint_count"] = int(len(seed_ckpt_files))
+        if seed_training_summary_file is not None:
+            wandb_run.summary["npe_seed_training_summary_file"] = seed_training_summary_file
+        if cfg.wandb_npe_log_model_paths:
+            wandb_run.summary["npe_overall_best_state_path"] = str(results_dir / "npe_flow.pt")
+            if seed_ckpt_files:
+                wandb_run.summary["npe_seed_checkpoint_paths"] = [
+                    str(results_dir / fname) for fname in seed_ckpt_files
+                ]
+            import wandb
+
+            artifact_name = re.sub(
+                r"[^A-Za-z0-9._-]+",
+                "-",
+                f"npe-models-{checkpoints_path.name or 'checkpoints'}-budget-{budget}",
+            )
+            model_artifact = wandb.Artifact(name=artifact_name, type="model")
+            model_artifact.add_file(str(results_dir / "npe_flow.pt"), name="npe_flow.pt")
+            for fname in seed_ckpt_files:
+                model_artifact.add_file(str(results_dir / fname), name=fname)
+            if seed_training_summary_file is not None:
+                model_artifact.add_file(
+                    str(results_dir / seed_training_summary_file),
+                    name=seed_training_summary_file,
+                )
+            wandb_run.log_artifact(model_artifact)
         wandb_run.finish()
 
     if vol is not None:
