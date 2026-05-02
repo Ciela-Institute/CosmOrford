@@ -45,6 +45,15 @@ cd "$HOME/software/CosmOrford"
 
 mkdir -p jobout
 
+# Guard against wandb 0.24.0 upload bug.
+WANDB_VERSION="$(python -c 'import wandb; print(wandb.__version__)')"
+echo "wandb      : $WANDB_VERSION"
+if [[ "$WANDB_VERSION" == 0.24.0* ]]; then
+  echo "ERROR: wandb $WANDB_VERSION has a known upload bug."
+  echo "Please install a different version before submitting jobs (e.g. 0.21.2+computecanada)."
+  exit 1
+fi
+
 # Compute nodes have no internet – save WandB run locally and sync afterwards.
 export WANDB_MODE=offline
 export COSMOFORD_SEED="$SEED"
