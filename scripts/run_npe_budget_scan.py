@@ -518,22 +518,28 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         t_va_np = t_val.cpu().numpy()
 
         probe = Ridge(alpha=1e-3).fit(s_tr_np, t_tr_np)
-        t_pred_norm = probe.predict(s_va_np)
+        t_pred_tr_norm = probe.predict(s_tr_np)
+        t_pred_va_norm = probe.predict(s_va_np)
 
-        t_pred_phys = t_pred_norm * THETA_STD[:2] + THETA_MEAN[:2]
-        t_true_phys = t_va_np * THETA_STD[:2] + THETA_MEAN[:2]
+        t_pred_tr_phys = t_pred_tr_norm * THETA_STD[:2] + THETA_MEAN[:2]
+        t_true_tr_phys = t_tr_np * THETA_STD[:2] + THETA_MEAN[:2]
+        t_pred_va_phys = t_pred_va_norm * THETA_STD[:2] + THETA_MEAN[:2]
+        t_true_va_phys = t_va_np * THETA_STD[:2] + THETA_MEAN[:2]
 
         param_labels = [r"$\Omega_m$", r"$S_8$"]
         fig, axes = plt.subplots(1, 2, figsize=(9, 4))
         for i, (ax, lbl) in enumerate(zip(axes, param_labels)):
-            lo = min(t_true_phys[:, i].min(), t_pred_phys[:, i].min())
-            hi = max(t_true_phys[:, i].max(), t_pred_phys[:, i].max())
-            ax.scatter(t_true_phys[:, i], t_pred_phys[:, i], s=2, alpha=0.3)
-            ax.plot([lo, hi], [lo, hi], "r--", lw=1.2, label="y = x")
+            lo = min(t_true_va_phys[:, i].min(), t_pred_va_phys[:, i].min())
+            hi = max(t_true_va_phys[:, i].max(), t_pred_va_phys[:, i].max())
+            ax.scatter(t_true_tr_phys[:, i], t_pred_tr_phys[:, i],
+                       s=1, alpha=0.2, color="tab:blue", label="train")
+            ax.scatter(t_true_va_phys[:, i], t_pred_va_phys[:, i],
+                       s=2, alpha=0.5, color="tab:orange", label="val")
+            ax.plot([lo, hi], [lo, hi], "r--", lw=1.2)
             ax.set_xlabel(f"True {lbl}")
             ax.set_ylabel(f"Predicted {lbl}")
             ax.legend(fontsize=8)
-        fig.suptitle(f"Compressor linear probe – budget {budget}")
+        fig.suptitle(f"Compressor linear probe – train (blue) / val (orange) – budget {budget}")
         fig.tight_layout()
         probe_plot_path = results_dir / "compressor_linear_probe.png"
         fig.savefig(probe_plot_path, dpi=120)
