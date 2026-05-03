@@ -149,7 +149,8 @@ for name, overrides, max_epochs, ckpt_metric, long_job in EXPERIMENTS:
             "precision": "16-mixed",
             "log_every_n_steps": 1,
             "check_val_every_n_epoch": 1,
-            "callbacks": BASE_TRAINER_CALLBACKS + [make_ckpt_callback(ckpt_metric)],
+            "callbacks": (BASE_TRAINER_CALLBACKS if not model_args.get("use_flow") else
+                          [BASE_TRAINER_CALLBACKS[0]]) + [make_ckpt_callback(ckpt_metric)],
             "logger": make_wandb_logger(
                 f"compressor_explore_l1_{name}_budget20200",
                 ["compressor-explore", "l1", name],

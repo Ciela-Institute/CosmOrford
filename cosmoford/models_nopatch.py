@@ -222,6 +222,14 @@ class StatsCompressorNoPatch(L.LightningModule):
       nn.Linear(summary_dim * 4, 2 * 2),
     )
 
+  def on_load_checkpoint(self, checkpoint: dict) -> None:
+    """Register normalization buffers before load_state_dict so strict loading works."""
+    sd = checkpoint.get("state_dict", {})
+    if getattr(self.hparams, "use_fixed_normalization", False):
+      for key in ("feature_mean", "feature_std"):
+        if key in sd and not hasattr(self, key):
+          self.register_buffer(key, sd[key].clone())
+
   def on_train_start(self):
     """Compute fixed normalization (mean/std) over the training set once.
 
