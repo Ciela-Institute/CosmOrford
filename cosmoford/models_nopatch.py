@@ -24,29 +24,59 @@ try:
   from nflows.flows import Flow
   from nflows.distributions import StandardNormal
   from nflows.transforms import CompositeTransform, MaskedAffineAutoregressiveTransform, RandomPermutation
+  from nflows.transforms.coupling import AffineCouplingTransform
 except ImportError:  # Optional dependency unless flow training is enabled
   Flow = None
   StandardNormal = None
   CompositeTransform = None
   MaskedAffineAutoregressiveTransform = None
   RandomPermutation = None
+  AffineCouplingTransform = None
 
 
-def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64):
-  """Build a small conditional MAF: p(params | summaries)."""
+class _CondNet(nn.Module):
+  """Scale/shift network for affine coupling: maps (identity_split ++ context) → params."""
+  def __init__(self, in_features: int, out_features: int, hidden_dim: int, context_dim: int):
+    super().__init__()
+    self.net = nn.Sequential(
+      nn.Linear(in_features + context_dim, hidden_dim), nn.SiLU(),
+      nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),
+      nn.Linear(hidden_dim, out_features),
+    )
+  def forward(self, x, context):
+    return self.net(torch.cat([x, context], dim=-1))
+
+
+def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64, flow_type="maf"):
+  """Build a conditional flow for p(params | summaries).
+
+  flow_type: "maf" (Masked Autoregressive Flow) or "realnvp" (RealNVP affine coupling).
+  """
   if Flow is None or StandardNormal is None:
     raise ImportError(
       "build_flow requires the optional 'nflows' dependency. "
       "Install nflows to enable posterior-flow training."
     )
   transforms = []
-  for _ in range(n_transforms):
-    transforms.append(RandomPermutation(features=param_dim))
-    transforms.append(MaskedAffineAutoregressiveTransform(
-      features=param_dim,
-      hidden_features=hidden_dim,
-      context_features=context_dim,
-    ))
+  if flow_type == "realnvp":
+    if AffineCouplingTransform is None:
+      raise ImportError("AffineCouplingTransform not available from nflows.")
+    for i in range(n_transforms):
+      mask = torch.zeros(param_dim)
+      mask[i % param_dim] = 1  # alternate which dims are transformed
+      ctx, h = context_dim, hidden_dim
+      transforms.append(AffineCouplingTransform(
+        mask=mask,
+        transform_net_create_fn=lambda in_f, out_f, ctx=ctx, h=h: _CondNet(in_f, out_f, h, ctx),
+      ))
+  else:  # maf (default)
+    for _ in range(n_transforms):
+      transforms.append(RandomPermutation(features=param_dim))
+      transforms.append(MaskedAffineAutoregressiveTransform(
+        features=param_dim,
+        hidden_features=hidden_dim,
+        context_features=context_dim,
+      ))
   return Flow(
     transform=CompositeTransform(transforms),
     distribution=StandardNormal([param_dim]),
@@ -137,7 +167,10 @@ class StatsCompressorNoPatch(L.LightningModule):
     use_flow: bool = False,
     flow_transforms: int = 4,
     flow_hidden_dim: int = 64,
+    flow_type: str = "maf",
     lr_schedule: str = "step",
+    piecewise_decay_rate: float = 0.7,
+    piecewise_n_decays: int = 9,
     total_steps: int = 0,
     n_val_noise: int = 1,
     use_fixed_normalization: bool = False,
@@ -214,6 +247,7 @@ class StatsCompressorNoPatch(L.LightningModule):
         context_dim=summary_dim,
         n_transforms=flow_transforms,
         hidden_dim=flow_hidden_dim,
+        flow_type=flow_type,
       )
     self.head = nn.Sequential(
       nn.GELU(),
@@ -478,6 +512,16 @@ class StatsCompressorNoPatch(L.LightningModule):
     if self.hparams.lr_schedule == "cosine":
       main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps - warmup_steps
+      )
+    elif self.hparams.lr_schedule == "piecewise_constant":
+      # Decay by piecewise_decay_rate at piecewise_n_decays evenly-spaced milestones
+      n = self.hparams.piecewise_n_decays
+      remaining = total_steps - warmup_steps
+      milestones = [warmup_steps + int(remaining * (i + 1) / (n + 1)) for i in range(n)]
+      main_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer,
+        milestones=milestones,
+        gamma=self.hparams.piecewise_decay_rate,
       )
     else:
       steps_per_epoch = total_steps // self.trainer.max_epochs
