@@ -1,0 +1,22 @@
+exp_name: "unet/phase3/sigma_1e-4"
+
+config_yaml: /lustre09/project/6091102/juzgh/CosmOrford/configs/unet_condition_small.yaml  # best arch: small [16,32]
+
+wandb_project: neurips-wl-challenge
+wandb_entity: cosmostat
+wandb_run_name: "unet/phase3/sigma_1e-4"
+wandb_mode: offline
+
+ot_method: emd
+ot_reg: 0.1  # unused for emd
+eps: 0.001
+
+sigma: 0.0001  # <- varied
+base_lr: 1.0e-3
+gamma: 0.9
+num_epochs: 100
+batch_size: 500
+micro_batch_size: 40
+
+dataset_dir_nbody: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/neurips-wl-challenge-flat
+dataset_dir_logn_train: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/lognormal

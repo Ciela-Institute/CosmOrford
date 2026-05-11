@@ -1,0 +1,27 @@
+# Config for scripts/hf_emulated_dataset.py
+# Budget-specific fields (run_dir, dataset_name) can be overridden via CLI:
+#   python hf_emulated_dataset.py --config ... --run_dir <path> --dataset_name <name>
+
+# Lognormal input dataset
+hf_path: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/lognormal
+
+# UNet run directory and checkpoint
+# Overridden per budget by --run_dir CLI arg in run_hf_emulated_dataset.slurm
+run_dir: /lustre09/project/6091102/juzgh/CosmOrford/cosmoford/emulator/wandb/offline-run-20260319_111305-o4aoni1c
+unet_checkpoint: unet_best.pth
+
+# Output
+output_dir: /lustre09/project/6091102/juzgh/cosmoford_exp/emulated_datasets/
+# Overridden per budget by --dataset_name CLI arg in run_hf_emulated_dataset.slurm
+dataset_name: unet_lognormal_small_budget_20200
+
+# Generation parameters
+chunk_size: 50
+batch_size: 50
+rtol: 1.0e-2
+atol: 1.0e-2
+nb_steps: 11
+
+# Dataset subsetting
+fraction_of_logn_to_generate: 1.0
+part_of_the_batched_dataset_to_generate: 0

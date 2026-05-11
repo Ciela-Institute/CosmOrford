@@ -1,0 +1,9 @@
+input_dir: /lustre09/project/6091102/juzgh/cosmoford_exp/emulated_datasets/
+output_dir: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/
+output_dataset_name: unet_lognormal_small_budget_scan
+
+budgets: [100, 1000, 5000, 10000, 20200]
+
+# Each per-budget dataset is expected at: input_dir / dataset_name.format(budget=N).hf
+# Must match the dataset_name set in each hf_emulated_dataset.yaml config
+dataset_name: "unet_lognormal_small_budget_{budget}"
