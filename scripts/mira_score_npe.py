@@ -120,10 +120,19 @@ if __name__ == "main":
         description="MIRA Score",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+
+    parser.add_argument("--budget", required = True, type = int, help = "Training Budget used for the Compressor and the NPE training.")
     parser.add_argument("--compressor_ckpt_path", required=True,
-                        help="Path where chec")
+                        help="Checkpoint path for the compressor")
     parser.add_argument("--flow_ckpt_path", required=True,
-                        help="Path where chec")
+                        help="Checkpoints path for the npe model")
     parser.add_argument("--holdout_path", required=True,
                         help="Path to holdout DatasetDict (save_to_disk format, 'train' and 'fiducial' splits)")
+    parser.add_argument("--normalize", required=False, default = False, type = bool,
+                        help="Whether to normalize the summaries before feeding them to the normalizing flow. Defaults to False.")
+    parser.add_argument("--num_samples", required=False, default = 10_000, type = int,
+                        help="Number of posterior samples to create per observation. Defaults to 10 000.")
+    parser.add_argument("--num_obs", required=False, default = 200, type = int,
+                        help="Number of observations to take from the holdout dataset. Defaults to 200.")
+
     args = parser.parse_args()
