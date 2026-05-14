@@ -4,6 +4,7 @@ from tqdm import tqdm
 import torch 
 import numpy as np 
 import yaml
+from mira_score import get_device, mira, mira_bootstrap
 
 def load_yaml(path): 
     with open(path) as file: 
@@ -34,6 +35,8 @@ from pathlib import Path
 from typing import List
 from datasets import load_from_disk
 from glob import glob
+
+device = get_device()
 
 def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = False) -> str:
     """Find the best compressor checkpoint for a given budget.
@@ -170,13 +173,28 @@ def main(args):
 
     
     posterior_samples = np.array(posterior_samples) # (N_obs, N_posterior_samples, 2)
+    # Make posterior_samples (1, N_obs, N_posterior_samples, 2)
+    posterior_samples = np.expand_dims(posterior_samples, axis=0) # (1, N_obs, N_posterior_samples, 2)
+
+    # Get access to the ground-truth parameters for the selected observations
+    fiducial = (theta[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]
 
     #### COMPUTE MIRA SCORE ####
+    mira_score_mean, mira_score_std = mira(
+        torch.tensor(fiducial).to(device), 
+        torch.tensor(posterior_samples).to(device), 
+        num_runs=100, 
+        norm=True
+    )
     
     #### SAVE MIRA-SCORE + POSTERIOR_SAMPLES + THETA_TRUE + CKPT DIRS FOR COMPRESSOR AND FLOW ####
     print("Saving results...")
     results_dir = args.results_dir
-    mira_score = None
+    mira_score = {
+    "mean": mira_score_mean.detach().cpu().numpy() if torch.is_tensor(mira_score_mean) else mira_score_mean,
+    "std": mira_score_std.detach().cpu().numpy() if torch.is_tensor(mira_score_std) else mira_score_std,
+}
+
 
     import os
     os.makedirs(args.results_dir,exist_ok=True)
