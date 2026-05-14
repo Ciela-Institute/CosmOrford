@@ -176,12 +176,9 @@ def main(args):
     # Make posterior_samples (1, N_obs, N_posterior_samples, 2)
     posterior_samples = np.expand_dims(posterior_samples, axis=0) # (1, N_obs, N_posterior_samples, 2)
 
-    # Get access to the ground-truth parameters for the selected observations
-    fiducial = (theta[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]
-
     #### COMPUTE MIRA SCORE ####
     mira_score_mean, mira_score_std = mira(
-        torch.tensor(fiducial).to(device), 
+        torch.tensor(theta[:, :2]).to(device), 
         torch.tensor(posterior_samples).to(device), 
         num_runs=100, 
         norm=True
