@@ -36,6 +36,9 @@ class NPEConfig:
     npe_patience: int = 50
     npe_seeds: int = 5
     n_posterior_samples: int = 10_000
+    # Calibration validation (TARP + MIRA) on the flat dataset validation split
+    n_val_maps: int = 500
+    n_val_posterior_samples: int = 1000
 
     @classmethod
     def from_yaml(cls, path: str) -> "NPEConfig":
@@ -115,7 +118,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None):
+def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None, load_flat_val=None):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -479,6 +482,103 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "best_val_nll": best_val_nll,
         "best_seed/posterior_plot": wandb.Image(str(plot_path)),
     })
+
+    # ── 9. TARP + MIRA calibration tests ──
+    # 9a: on the NPE's own held-out validation data (same distribution as training — sanity check)
+    # 9b: on the flat dataset validation split (held-out maps, needs noise+mask)
+    try:
+        from tarp import get_tarp_coverage
+        from mira_score import mira as mira_score
+        import torch as _torch
+
+        def _run_calibration(summaries_t, theta_norm, tag, n_cap=None):
+            """Sample posteriors then run TARP + MIRA. Returns (ecp, alpha, mira_mean, mira_std)."""
+            n = len(summaries_t) if n_cap is None else min(n_cap, len(summaries_t))
+            summaries_t = summaries_t[:n]
+            theta_norm = theta_norm[:n]
+
+            posterior = []
+            with _torch.no_grad():
+                for i in range(n):
+                    s_i = summaries_t[i:i+1].to(device)
+                    samps = flow.sample(cfg.n_val_posterior_samples, context=s_i)  # (1, S, 2)
+                    posterior.append(samps.squeeze(0).cpu().numpy())
+            posterior_arr = np.stack(posterior, axis=0)  # (n, S, 2)
+
+            ecp, alpha = get_tarp_coverage(
+                samples=posterior_arr.transpose(1, 0, 2),  # (S, n, 2)
+                theta=theta_norm,
+                references="random",
+                metric="euclidean",
+                norm=True,
+            )
+            posterior_torch = _torch.from_numpy(posterior_arr).unsqueeze(0)  # (1, n, S, 2)
+            truth_torch = _torch.from_numpy(theta_norm.astype(np.float32))
+            m_mean, m_std = mira_score(truth_torch, posterior_torch, num_runs=100, device=device)
+
+            # TARP plot
+            fig, ax = plt.subplots(figsize=(5, 5))
+            ax.plot(alpha, ecp, lw=2, label="NPE")
+            ax.plot([0, 1], [0, 1], "k--", lw=1, label="Ideal")
+            ax.fill_between(alpha, alpha, ecp, alpha=0.15)
+            ax.set_xlabel("Credibility level α")
+            ax.set_ylabel("Expected coverage probability")
+            ax.set_title(f"TARP [{tag}] budget={budget}, n={n}")
+            ax.legend()
+            tarp_path = results_dir / f"tarp_coverage_{tag}.png"
+            fig.savefig(str(tarp_path), dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            print(f"  [{tag}] TARP max|ecp-α| = {np.max(np.abs(ecp - alpha)):.4f}  "
+                  f"MIRA = {float(m_mean[0]):.4f} ± {float(m_std[0]):.4f}")
+            wandb.log({
+                f"calibration/{tag}/tarp_plot": wandb.Image(str(tarp_path)),
+                f"calibration/{tag}/mira_score": float(m_mean[0]),
+                f"calibration/{tag}/mira_std": float(m_std[0]),
+                f"calibration/{tag}/tarp_max_deviation": float(np.max(np.abs(ecp - alpha))),
+                f"calibration/{tag}/n_maps": n,
+            })
+            np.save(results_dir / f"tarp_ecp_{tag}.npy", ecp)
+            np.save(results_dir / f"tarp_alpha_{tag}.npy", alpha)
+            np.save(results_dir / f"val_posterior_samples_{tag}.npy", posterior_arr)
+            return ecp, alpha, m_mean, m_std
+
+        # 9a — NPE validation split (already computed, no reprocessing needed)
+        print("\nCalibration 9a: NPE held-out validation data...")
+        _run_calibration(
+            s_val.cpu(),
+            t_val.cpu().numpy(),
+            tag="npe_val",
+            n_cap=cfg.n_val_maps,
+        )
+
+        # 9b — flat dataset validation split (raw maps: add noise + mask first)
+        if load_flat_val is not None:
+            print("\nCalibration 9b: flat dataset validation split...")
+            from cosmoford import NOISE_STD as _NOISE_STD
+            _mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
+            rng_val = np.random.default_rng(99)
+
+            flat_val = load_flat_val("validation").with_format("numpy")
+            n_flat = min(cfg.n_val_maps, len(flat_val))
+            kappa_flat = np.array(flat_val[:n_flat]["kappa"])
+            theta_flat = np.array(flat_val[:n_flat]["theta"])
+            theta_flat_norm = ((theta_flat[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]).astype(np.float32)
+
+            flat_summaries = []
+            with _torch.no_grad():
+                for kappa_i in kappa_flat:
+                    kappa_rs = reshape_field_numpy(kappa_i[np.newaxis])[0]
+                    kappa_noisy = (kappa_rs + rng_val.standard_normal(kappa_rs.shape) * _NOISE_STD) * _mask
+                    x = _torch.from_numpy(kappa_noisy.astype(np.float32)).unsqueeze(0).to(device)
+                    flat_summaries.append(compressor.compress(x).cpu())
+            flat_summaries_t = _torch.cat(flat_summaries, dim=0)
+
+            _run_calibration(flat_summaries_t, theta_flat_norm, tag="flat_val")
+
+    except Exception as e:
+        print(f"WARNING: TARP/MIRA calibration failed: {e}")
+
     wandb.finish()
 
     if vol is not None:
@@ -510,6 +610,9 @@ if __name__ != "__main__":
             "nflows",
             "matplotlib",
             "scikit-learn",
+            "tarp",
+            "mira_score",
+            "getdist",
         )
         .add_local_dir("cosmoford", "/root/cosmoford", copy=True)
         .add_local_dir("configs", "/root/configs", copy=True)
@@ -545,6 +648,7 @@ if __name__ != "__main__":
             lambda split: _hf_load("CosmoStat/neurips-wl-challenge-holdout", split=split),
             cfg,
             vol=volume,
+            load_flat_val=lambda split: _hf_load("CosmoStat/neurips-wl-challenge-flat", split=split),
         )
 
     @app.function(
@@ -596,6 +700,9 @@ if __name__ == "__main__":
                         help="Path for caching pre-computed summaries")
     parser.add_argument("--holdout_path", required=True,
                         help="Path to holdout DatasetDict (save_to_disk format, 'train' and 'fiducial' splits)")
+    parser.add_argument("--flat_dataset_path", default=None,
+                        help="Path to neurips-wl-challenge-flat DatasetDict (save_to_disk format). "
+                             "If provided, TARP and MIRA calibration tests are run on the 'validation' split.")
     parser.add_argument("--config", required=True,
                         help="Path to YAML config file (configs/experiments/npe_budget_scan.yaml)")
     parser.add_argument("--budgets",
@@ -610,6 +717,7 @@ if __name__ == "__main__":
         cfg.budgets = [int(b) for b in args.budgets.split(",")]
 
     holdout_ds = load_from_disk(args.holdout_path)
+    flat_ds = load_from_disk(args.flat_dataset_path) if args.flat_dataset_path else None
 
     for budget in cfg.budgets:
         _train_budget_core(
@@ -620,4 +728,5 @@ if __name__ == "__main__":
             lambda split, ds=holdout_ds: ds[split],
             cfg,
             offline=args.offline,
+            load_flat_val=(lambda split, ds=flat_ds: ds[split]) if flat_ds is not None else None,
         )

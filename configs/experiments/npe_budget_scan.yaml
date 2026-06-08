@@ -16,3 +16,7 @@ npe_seeds: 5
 
 # FoM evaluation
 n_posterior_samples: 10000
+
+# Calibration validation (TARP + MIRA) — requires `pip install tarp mira_score`
+n_val_maps: 500
+n_val_posterior_samples: 1000
