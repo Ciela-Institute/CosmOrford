@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK, NOISE_STD
+from cosmoford.dataset import reshape_field_numpy
 from cosmoford.summaries import power_spectrum_batch
 from torchvision.models.efficientnet import efficientnet_b0, efficientnet_b2, efficientnet_v2_s, efficientnet_v2_m
 from torchvision.models.resnet import resnet18, ResNet18_Weights
@@ -42,7 +43,8 @@ class RegressionModelNoPatch(L.LightningModule):
                total_steps: int = 0,
                n_val_noise: int = 1,
                use_peft: bool = False, lora_r: int = 8, lora_alpha: int = 16,
-               lora_dropout: float = 0.1, lora_target_modules: list = None):
+               lora_dropout: float = 0.1, lora_target_modules: list = None,
+               holdout_path: str = None):
     super().__init__()
 
     self.mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
@@ -146,7 +148,8 @@ class RegressionModelNoPatch(L.LightningModule):
       'lora_r': lora_r,
       'lora_alpha': lora_alpha,
       'lora_dropout': lora_dropout,
-      'lora_target_modules': lora_target_modules_used  # Save the actual modules used, not None
+      'lora_target_modules': lora_target_modules_used,  # Save the actual modules used, not None
+      'holdout_path': holdout_path,
     })
 
     self.reshape_head = nn.Sequential(
@@ -433,3 +436,56 @@ class RegressionModelNoPatch(L.LightningModule):
             "frequency": 1,
         },
     }
+
+  def evaluate_on_holdout(self, holdout_path: str = None, batch_size: int = 64, max_samples: int = None):
+    """Evaluate score/MSE on the held-out test dataset (genuine generalization test, separate
+    from the ChallengeDataModule's internal train/validation split). Maps in this dataset are
+    already noisy and masked, so no augmentation is applied here."""
+    from datasets import load_from_disk
+
+    holdout_path = holdout_path or self.hparams.holdout_path
+    if not holdout_path:
+      return None
+
+    holdout = load_from_disk(holdout_path)["train"].with_format("numpy")
+    n = len(holdout) if max_samples is None else min(max_samples, len(holdout))
+
+    device = self.device
+    theta_mean_t = torch.tensor(THETA_MEAN[:2], device=device, dtype=torch.float32)
+    theta_std_t = torch.tensor(THETA_STD[:2], device=device, dtype=torch.float32)
+
+    was_training = self.training
+    self.eval()
+    scores, mses = [], []
+    with torch.no_grad():
+      for start in range(0, n, batch_size):
+        batch = holdout[start:start + batch_size]
+        kappa = reshape_field_numpy(np.array(batch["kappa"]))  # (B, 1834, 88)
+        theta = np.array(batch["theta"])[:, :2]  # (B, 2), physical units
+
+        x = torch.from_numpy(kappa).float().to(device)
+        mean, std, _ = self(x)
+        mean = mean * theta_std_t + theta_mean_t
+        std = std * theta_std_t
+        y = torch.from_numpy(theta).float().to(device)
+
+        sq_error = (y - mean) ** 2
+        score = -torch.sum(sq_error / std**2 + torch.log(std**2) + 1000.0 * sq_error, dim=1)
+        mse = F.mse_loss(mean, y, reduction="none").mean(dim=1)
+        scores.extend(score.cpu().tolist())
+        mses.extend(mse.cpu().tolist())
+    if was_training:
+      self.train()
+
+    return float(np.mean(scores)), float(np.mean(mses))
+
+  def on_train_end(self):
+    """Once training finishes, run a single evaluation pass on the held-out test dataset
+    and log the resulting score/MSE to wandb."""
+    result = self.evaluate_on_holdout()
+    if result is None:
+      return
+    holdout_score, holdout_mse = result
+    print(f"Holdout score: {holdout_score:.4f}, Holdout MSE: {holdout_mse:.6f}")
+    if self.logger is not None:
+      self.logger.experiment.log({"holdout_score": holdout_score, "holdout_mse": holdout_mse})
