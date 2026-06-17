@@ -135,6 +135,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
     import numpy as np
     import torch
+    import torch.nn.functional as F
 
     from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD
     from cosmoford.dataset import reshape_field_numpy
@@ -368,19 +369,25 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     holdout = load_holdout("fiducial")
     holdout = holdout.with_format("numpy")
     kappa_all_fom = np.array(holdout["kappa"])
+    theta_all_fom = np.array(holdout["theta"])
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
     from cosmoford import SURVEY_MASK
     mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
+    theta_mean_t = torch.tensor(THETA_MEAN[:2], device=device, dtype=torch.float32)
+    theta_std_t = torch.tensor(THETA_STD[:2], device=device, dtype=torch.float32)
+
     fom_values = []
+    mse_values = []  # compressor regression-head MSE, same formula as RegressionModelNoPatch.validation_step
+    score_values = []  # compressor regression-head score, same formula as RegressionModelNoPatch.validation_step
     all_posterior_samples = []  # (n_maps, n_posterior_samples, 2) in physical units
     with torch.no_grad():
-        for kappa_i in kappa_all_fom:
+        for i, kappa_i in enumerate(kappa_all_fom):
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
             noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
-            s = compressor.compress(x)  # (1, 8)
+            mean_raw, std_raw, s = compressor(x)  # mean/std in normalized parameter space, s: (1, 8)
 
             # Sample posterior
             samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
@@ -399,9 +406,26 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 fom = 0.0
             fom_values.append(fom)
 
+            # Compressor regression-head mse/score against the true fiducial theta
+            y_phys = torch.tensor(theta_all_fom[i, :2], device=device, dtype=torch.float32).unsqueeze(0)
+            mean_phys = mean_raw * theta_std_t + theta_mean_t
+            std_phys = std_raw * theta_std_t
+            sq_error = (y_phys - mean_phys) ** 2
+            score_i = -torch.sum(sq_error / std_phys**2 + torch.log(std_phys**2) + 1000.0 * sq_error, dim=1)
+            mse_i = F.mse_loss(mean_phys, y_phys)
+            score_values.append(score_i.item())
+            mse_values.append(mse_i.item())
+
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
+
+    mse_mean = np.mean(mse_values)
+    mse_std = np.std(mse_values)
+    score_mean = np.mean(score_values)
+    score_std = np.std(score_values)
+    print(f"  MSE = {mse_mean:.6f} ± {mse_std:.6f}")
+    print(f"  Score = {score_mean:.2f} ± {score_std:.2f}")
 
     # ── 7. Save results ──
     torch.save(best_state, results_dir / "npe_flow.pt")
@@ -418,6 +442,12 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "fom_mean": float(fom_mean),
         "fom_std": float(fom_std),
         "fom_values": [float(v) for v in fom_values],
+        "mse_mean": float(mse_mean),
+        "mse_std": float(mse_std),
+        "mse_values": [float(v) for v in mse_values],
+        "score_mean": float(score_mean),
+        "score_std": float(score_std),
+        "score_values": [float(v) for v in score_values],
         "best_val_nll": float(best_val_nll),
         "n_noise_realizations": cfg.n_noise_realizations,
         "n_fiducial_maps": len(kappa_all_fom),
@@ -479,6 +509,10 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     wandb.log({
         "fom_mean": fom_mean,
         "fom_std": fom_std,
+        "mse_mean": mse_mean,
+        "mse_std": mse_std,
+        "score_mean": score_mean,
+        "score_std": score_std,
         "best_val_nll": best_val_nll,
         "best_seed/posterior_plot": wandb.Image(str(plot_path)),
     })
@@ -486,6 +520,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     # ── 9. TARP + MIRA calibration tests ──
     # 9a: on the NPE's own held-out validation data (same distribution as training — sanity check)
     # 9b: on the flat dataset validation split (held-out maps, needs noise+mask)
+    calibration_results = {}
     try:
         from tarp import get_tarp_coverage
         from mira_score import mira as mira_score
@@ -545,12 +580,17 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
         # 9a — NPE validation split (already computed, no reprocessing needed)
         print("\nCalibration 9a: NPE held-out validation data...")
-        _run_calibration(
+        ecp_a, alpha_a, mira_mean_a, mira_std_a = _run_calibration(
             s_val.cpu(),
             t_val.cpu().numpy(),
             tag="npe_val",
             n_cap=cfg.n_val_maps,
         )
+        calibration_results["npe_val"] = {
+            "mira_mean": float(mira_mean_a[0]),
+            "mira_std": float(mira_std_a[0]),
+            "tarp_max_deviation": float(np.max(np.abs(ecp_a - alpha_a))),
+        }
 
         # 9b — flat dataset validation split (raw maps: add noise + mask first)
         if load_flat_val is not None:
@@ -574,10 +614,21 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                     flat_summaries.append(compressor.compress(x).cpu())
             flat_summaries_t = _torch.cat(flat_summaries, dim=0)
 
-            _run_calibration(flat_summaries_t, theta_flat_norm, tag="flat_val")
+            ecp_b, alpha_b, mira_mean_b, mira_std_b = _run_calibration(
+                flat_summaries_t, theta_flat_norm, tag="flat_val"
+            )
+            calibration_results["flat_val"] = {
+                "mira_mean": float(mira_mean_b[0]),
+                "mira_std": float(mira_std_b[0]),
+                "tarp_max_deviation": float(np.max(np.abs(ecp_b - alpha_b))),
+            }
 
     except Exception as e:
         print(f"WARNING: TARP/MIRA calibration failed: {e}")
+
+    if calibration_results:
+        results["calibration"] = calibration_results
+        (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
     wandb.finish()
 
