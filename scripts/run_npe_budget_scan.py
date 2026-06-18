@@ -268,6 +268,18 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     s_val, t_val = summaries_tensor[val_idx], thetas_tensor[val_idx]
     print(f"Train: {n_train}, Val: {n_val}")
 
+    # Context normalization stats, computed once from the training split. Must be applied
+    # consistently everywhere a context summary is fed to the flow (train, val, FoM eval,
+    # TARP/MIRA calibration) — not just during training — since the flow is trained to expect
+    # normalized context when context_normalization=True.
+    ctx_mean = s_train.mean(dim=0, keepdim=True) if context_normalization else None
+    ctx_std = s_train.std(dim=0, keepdim=True) if context_normalization else None
+
+    def _normalize_context(s):
+        if not context_normalization:
+            return s
+        return (s - ctx_mean.to(s.device)) / ctx_std.to(s.device)
+
     train_dataset = torch.utils.data.TensorDataset(s_train, t_train)
     val_dataset = torch.utils.data.TensorDataset(s_val, t_val)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.npe_batch_size, shuffle=True)
@@ -299,8 +311,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             train_losses = []
             for s_batch, t_batch in train_loader:
                 s_batch, t_batch = s_batch.to(device), t_batch.to(device)
-                if context_normalization:
-                    s_batch = (s_batch - s_train.mean(dim=0, keepdim=True).to(device)) / s_train.std(dim=0, keepdim=True).to(device)
+                s_batch = _normalize_context(s_batch)
                 loss = -flow.log_prob(t_batch, context=s_batch).mean()
                 optimizer.zero_grad()
                 loss.backward()
@@ -315,6 +326,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             with torch.no_grad():
                 for s_batch, t_batch in val_loader:
                     s_batch, t_batch = s_batch.to(device), t_batch.to(device)
+                    s_batch = _normalize_context(s_batch)
                     val_losses.append(-flow.log_prob(t_batch, context=s_batch).mean().item())
 
             mean_train = np.mean(train_losses)
@@ -391,6 +403,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             mean_raw, std_raw, s = compressor(x)  # mean/std in normalized parameter space, s: (1, 8)
+            s = _normalize_context(s)
 
             # Sample posterior
             samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
@@ -532,7 +545,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         def _run_calibration(summaries_t, theta_norm, tag, n_cap=None):
             """Sample posteriors then run TARP + MIRA. Returns (ecp, alpha, mira_mean, mira_std)."""
             n = len(summaries_t) if n_cap is None else min(n_cap, len(summaries_t))
-            summaries_t = summaries_t[:n]
+            summaries_t = _normalize_context(summaries_t[:n])
             theta_norm = theta_norm[:n]
 
             posterior = []
