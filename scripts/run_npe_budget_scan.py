@@ -118,7 +118,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None, load_flat_val=None):
+def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None, load_flat_val=None, context_normalization: bool = False):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -130,6 +130,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         cfg: NPEConfig with all training hyperparameters
         offline: if True, disable W&B checkpoint fallback and raise if no local checkpoint found
         vol: optional modal.Volume; if provided, .reload()/.commit() are called around I/O
+        context_normalization: if True, enable context normalization
     """
     import json
 
@@ -298,6 +299,8 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             train_losses = []
             for s_batch, t_batch in train_loader:
                 s_batch, t_batch = s_batch.to(device), t_batch.to(device)
+                if context_normalization:
+                    s_batch = (s_batch - s_train.mean(dim=0, keepdim=True).to(device)) / s_train.std(dim=0, keepdim=True).to(device)
                 loss = -flow.log_prob(t_batch, context=s_batch).mean()
                 optimizer.zero_grad()
                 loss.backward()
@@ -761,6 +764,8 @@ if __name__ == "__main__":
                              "(overrides the budgets list in the config file)")
     parser.add_argument("--offline", help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
                              "is not found locally", type = bool)
+    parser.add_argument("--context_normalization", help="Enable context normalization", default=False,
+                        type = bool)
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
@@ -780,4 +785,5 @@ if __name__ == "__main__":
             cfg,
             offline=args.offline,
             load_flat_val=(lambda split, ds=flat_ds: ds[split]) if flat_ds is not None else None,
+            context_normalization=args.context_normalization
         )
