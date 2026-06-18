@@ -480,8 +480,20 @@ class RegressionModelNoPatch(L.LightningModule):
     return float(np.mean(scores)), float(np.mean(mses))
 
   def on_train_end(self):
-    """Once training finishes, run a single evaluation pass on the held-out test dataset
-    and log the resulting score/MSE to wandb."""
+    """Once training finishes, load the best checkpoint (as tracked by the ModelCheckpoint
+    callback) and run a single evaluation pass on the held-out test dataset, logging the
+    resulting score/MSE to wandb."""
+    best_model_path = None
+    if self.trainer is not None and self.trainer.checkpoint_callback is not None:
+      best_model_path = self.trainer.checkpoint_callback.best_model_path
+
+    if best_model_path:
+      checkpoint = torch.load(best_model_path, map_location=self.device)
+      self.load_state_dict(checkpoint["state_dict"])
+      print(f"Loaded best checkpoint for holdout evaluation: {best_model_path}")
+    else:
+      print("No best checkpoint found; evaluating holdout with current (last) weights.")
+
     result = self.evaluate_on_holdout()
     if result is None:
       return
