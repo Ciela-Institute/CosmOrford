@@ -118,7 +118,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None, load_flat_val=None):
+def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None, load_flat_val=None, context_normalization: bool = False):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -130,6 +130,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         cfg: NPEConfig with all training hyperparameters
         offline: if True, disable W&B checkpoint fallback and raise if no local checkpoint found
         vol: optional modal.Volume; if provided, .reload()/.commit() are called around I/O
+        context_normalization: if True, enable context normalization
     """
     import json
 
@@ -267,6 +268,18 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     s_val, t_val = summaries_tensor[val_idx], thetas_tensor[val_idx]
     print(f"Train: {n_train}, Val: {n_val}")
 
+    # Context normalization stats, computed once from the training split. Must be applied
+    # consistently everywhere a context summary is fed to the flow (train, val, FoM eval,
+    # TARP/MIRA calibration) — not just during training — since the flow is trained to expect
+    # normalized context when context_normalization=True.
+    ctx_mean = s_train.mean(dim=0, keepdim=True) if context_normalization else None
+    ctx_std = s_train.std(dim=0, keepdim=True) if context_normalization else None
+
+    def _normalize_context(s):
+        if not context_normalization:
+            return s
+        return (s - ctx_mean.to(s.device)) / ctx_std.to(s.device)
+
     train_dataset = torch.utils.data.TensorDataset(s_train, t_train)
     val_dataset = torch.utils.data.TensorDataset(s_val, t_val)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.npe_batch_size, shuffle=True)
@@ -298,6 +311,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             train_losses = []
             for s_batch, t_batch in train_loader:
                 s_batch, t_batch = s_batch.to(device), t_batch.to(device)
+                s_batch = _normalize_context(s_batch)
                 loss = -flow.log_prob(t_batch, context=s_batch).mean()
                 optimizer.zero_grad()
                 loss.backward()
@@ -312,6 +326,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             with torch.no_grad():
                 for s_batch, t_batch in val_loader:
                     s_batch, t_batch = s_batch.to(device), t_batch.to(device)
+                    s_batch = _normalize_context(s_batch)
                     val_losses.append(-flow.log_prob(t_batch, context=s_batch).mean().item())
 
             mean_train = np.mean(train_losses)
@@ -388,6 +403,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
             mean_raw, std_raw, s = compressor(x)  # mean/std in normalized parameter space, s: (1, 8)
+            s = _normalize_context(s)
 
             # Sample posterior
             samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
@@ -529,7 +545,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         def _run_calibration(summaries_t, theta_norm, tag, n_cap=None):
             """Sample posteriors then run TARP + MIRA. Returns (ecp, alpha, mira_mean, mira_std)."""
             n = len(summaries_t) if n_cap is None else min(n_cap, len(summaries_t))
-            summaries_t = summaries_t[:n]
+            summaries_t = _normalize_context(summaries_t[:n])
             theta_norm = theta_norm[:n]
 
             posterior = []
@@ -761,6 +777,8 @@ if __name__ == "__main__":
                              "(overrides the budgets list in the config file)")
     parser.add_argument("--offline", help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
                              "is not found locally", type = bool)
+    parser.add_argument("--context_normalization", help="Enable context normalization", default=False,
+                        type = bool)
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
@@ -780,4 +798,5 @@ if __name__ == "__main__":
             cfg,
             offline=args.offline,
             load_flat_val=(lambda split, ds=flat_ds: ds[split]) if flat_ds is not None else None,
+            context_normalization=args.context_normalization
         )
