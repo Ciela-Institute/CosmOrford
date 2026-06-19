@@ -422,10 +422,17 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 fom = 0.0
             fom_values.append(fom)
 
-            # Compressor regression-head mse/score against the true fiducial theta
+            # Compressor regression-head mse/score against the true fiducial theta.
+            # When use_flow=True the regression head (mean_raw/std_raw) is never trained
+            # (training_step only backprops through flow.log_prob), so its outputs are
+            # meaningless -- use the flow posterior's mean/std instead.
             y_phys = torch.tensor(theta_all_fom[i, :2], device=device, dtype=torch.float32).unsqueeze(0)
-            mean_phys = mean_raw * theta_std_t + theta_mean_t
-            std_phys = std_raw * theta_std_t
+            if compressor.hparams.use_flow:
+                mean_phys = torch.from_numpy(samples_phys.mean(axis=0)).to(device, dtype=torch.float32).unsqueeze(0)
+                std_phys = torch.from_numpy(samples_phys.std(axis=0)).to(device, dtype=torch.float32).unsqueeze(0)
+            else:
+                mean_phys = mean_raw * theta_std_t + theta_mean_t
+                std_phys = std_raw * theta_std_t
             sq_error = (y_phys - mean_phys) ** 2
             score_i = -torch.sum(sq_error / std_phys**2 + torch.log(std_phys**2) + 1000.0 * sq_error, dim=1)
             mse_i = F.mse_loss(mean_phys, y_phys)
