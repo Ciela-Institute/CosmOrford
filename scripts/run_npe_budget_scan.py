@@ -291,7 +291,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
     wandb.init(name=f"npe_budget_{budget}", **_wandb_kwargs)
     overall_best_nll = float("inf")
-    overall_best_state = None
+    seed_states = []
 
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
@@ -357,16 +357,30 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         print(f"  Seed {seed+1} best val NLL: {best_val_nll:.4f}")
         wandb.log({f"seed{seed+1}/best_val_nll": best_val_nll})
 
-        if best_val_nll < overall_best_nll:
-            overall_best_nll = best_val_nll
-            overall_best_state = best_state
+        seed_states.append(best_state)
+        overall_best_nll = min(overall_best_nll, best_val_nll)
 
-    # Restore overall best model
-    flow = build_flow(param_dim=2, context_dim=8).to(device)
-    flow.load_state_dict(overall_best_state)
-    flow.eval()
+    # Build an ensemble from every seed's best checkpoint instead of keeping only the seed
+    # with lowest val_nll. Picking a single "best-by-val_nll" flow selects for sharpness, not
+    # calibration, which is why MIRA/TARP coverage drifted inconsistently across budgets;
+    # sampling from a uniform mixture over the ensemble (a standard deep-ensemble calibration
+    # trick) damps that per-seed overfitting noise.
+    ensemble_flows = []
+    for state in seed_states:
+        f = build_flow(param_dim=2, context_dim=8).to(device)
+        f.load_state_dict(state)
+        f.eval()
+        ensemble_flows.append(f)
     best_val_nll = overall_best_nll
-    print(f"\nOverall best val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f}")
+    print(f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
+          f"(sampling from ensemble of all {len(ensemble_flows)} seeds)")
+
+    def _ensemble_sample(n_samples, context):
+        """Draw n_samples total from a uniform mixture over the seed ensemble."""
+        n_members = len(ensemble_flows)
+        counts = [n_samples // n_members] * n_members
+        counts[0] += n_samples - sum(counts)
+        return torch.cat([f.sample(c, context=context) for f, c in zip(ensemble_flows, counts) if c > 0], dim=1)
 
     # ── 6. Compute FoM at fiducial cosmology ──
     print("Computing FoM (all fiducial maps)...")
@@ -406,7 +420,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             s = _normalize_context(s)
 
             # Sample posterior
-            samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
+            samples = _ensemble_sample(cfg.n_posterior_samples, s)  # (1, N, 2)
             samples = samples.squeeze(0).cpu().numpy()  # (N, 2)
 
             # Unnormalize to physical parameters
@@ -451,7 +465,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     print(f"  Score = {score_mean:.2f} ± {score_std:.2f}")
 
     # ── 7. Save results ──
-    torch.save(best_state, results_dir / "npe_flow.pt")
+    torch.save(seed_states, results_dir / "npe_flow_ensemble.pt")
 
     # Save posterior samples: shape (n_fiducial_maps, n_posterior_samples, 2)
     # columns: [Omega_m, S_8] in physical units
@@ -559,7 +573,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             with _torch.no_grad():
                 for i in range(n):
                     s_i = summaries_t[i:i+1].to(device)
-                    samps = flow.sample(cfg.n_val_posterior_samples, context=s_i)  # (1, S, 2)
+                    samps = _ensemble_sample(cfg.n_val_posterior_samples, s_i)  # (1, S, 2)
                     posterior.append(samps.squeeze(0).cpu().numpy())
             posterior_arr = np.stack(posterior, axis=0)  # (n, S, 2)
 
