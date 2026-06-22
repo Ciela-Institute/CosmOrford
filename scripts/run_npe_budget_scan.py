@@ -65,25 +65,31 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
 
     # for ckpt in checkpoint_dir.glob("*.ckpt"): 
     #     print(ckpt)
-    # Strategy 1: Parse val_mse from checkpoint filenames
+    # Strategy 1: Parse the monitored val loss from checkpoint filenames, pick lowest.
+    # Filenames are written as "step=<N>-<metric>=<value>.ckpt"; the metric name varies
+    # (val_log_prob for the Gaussian-head loss, val_nll for use_flow=True) depending on
+    # which training config produced the checkpoint, so try both. If the parsed values are
+    # degenerate (e.g. older runs whose filename embeds a metric that was never logged for
+    # that hparams.use_flow setting, so every checkpoint shows the same placeholder value),
+    # the metric carries no information -- break ties by picking the highest training step
+    # instead of silently keeping whichever file glob() happened to list first.
     if checkpoint_dir.exists():
-        best_path = None
-        best_logp = float("inf")
-
+        candidates = []  # (loss_value, step, path)
         for ckpt in checkpoints:
             print(ckpt)
-            if ckpt == "last.ckpt":
+            if Path(ckpt).name == "last.ckpt":
                 continue
-            # match = re.search(r"val_log_prob=([\d.]+)", ckpt)
-            match = re.search(r"val_log_prob=([-+]?\d*\.?\d+)", ckpt)
-            if match:
-                logp = float(match.group(1))
-                if logp < best_logp:
-                    best_logp = logp
-                    best_path = str(ckpt)
+            match = re.search(r"val_(?:log_prob|nll)=([-+]?\d*\.?\d+)", ckpt)
+            step_match = re.search(r"step=(\d+)", ckpt)
+            if match and step_match:
+                candidates.append((float(match.group(1)), int(step_match.group(1)), str(ckpt)))
 
-        if best_path is not None:
-            print(f"Found best checkpoint for budget-{budget}: {best_path} (val_log_prob={best_logp:.6f})")
+        if candidates:
+            best_loss = min(c[0] for c in candidates)
+            tied = [c for c in candidates if c[0] == best_loss]
+            best_loss, best_step, best_path = max(tied, key=lambda c: c[1])
+            print(f"Found best checkpoint for budget-{budget}: {best_path} "
+                  f"(val_loss={best_loss:.6f}, step={best_step}, {len(tied)}/{len(candidates)} tied)")
             return best_path
 
         # Strategy 2: Fall back to last.ckpt
@@ -291,12 +297,13 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
     wandb.init(name=f"npe_budget_{budget}", **_wandb_kwargs)
     overall_best_nll = float("inf")
+
     seed_states = []
 
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
 
-        torch.manual_seed(seed + 42)
+        torch.manual_seed(seed + 92)
         flow = build_flow(param_dim=2, context_dim=8).to(device)
         optimizer = torch.optim.Adam(flow.parameters(), lr=cfg.npe_lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.npe_epochs)
@@ -586,7 +593,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             )
             posterior_torch = _torch.from_numpy(posterior_arr).unsqueeze(0)  # (1, n, S, 2)
             truth_torch = _torch.from_numpy(theta_norm.astype(np.float32))
-            m_mean, m_std = mira_score(truth_torch, posterior_torch, num_runs=100, device=device)
+            m_mean, m_std = mira_score(truth_torch, posterior_torch, num_runs=500, norm=True, device=device)
 
             # TARP plot
             fig, ax = plt.subplots(figsize=(5, 5))
