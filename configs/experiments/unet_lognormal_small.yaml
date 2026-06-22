@@ -15,16 +15,17 @@ sigma: 0.0001     # Phase 3 best
 
 base_lr: 5.0e-4   # Phase 4 best
 gamma: 0.85       # Phase 4 best
-max_steps: 50000
+max_steps: 70000
 
 batch_size: 500
 micro_batch_size: 40
 
 best_ckpt_metric: "pqm_chi2"
-n_pqm_evals: 20
+n_pqm_evals: 40
 
 dataset_dir_nbody: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/neurips-wl-challenge-flat
 dataset_dir_logn_train: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/lognormal
+dataset_dir_pqm_nbody: /home/juzgh/links/projects/rrg-lplevass/shared/wl_chall_data/neurips-wl-challenge
 
 # Simulation budget (N-body only; lognormal uses full dataset)
 # Pass via CLI: --sim_budget N  (one of: 100, 1000, 5000, 10000, 20200)

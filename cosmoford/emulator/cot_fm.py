@@ -51,7 +51,7 @@ with open(cli.exp_config) as f:
     _cfg = yaml.safe_load(f)
 _cfg.pop("exp_name", None)
 
-_defaults = {"seed": 42}
+_defaults = {"seed": 42, "dataset_dir_pqm_nbody": None}
 _defaults.update(_cfg)
 args = argparse.Namespace(**_defaults)
 
@@ -83,7 +83,10 @@ else:
 # Sorted N-body dataset for PQMass: 256 entries × (101 cosmologies, H, W).
 # Each entry is one nuisance realization; the 101-axis gives unique cosmologies.
 # For fully i.i.d. samples we draw an independent nuisance index per cosmology.
-pqm_nbody_dataset = load_dataset("cosmostat/neurips-wl-challenge", split="train").with_format('numpy')
+if args.dataset_dir_pqm_nbody is not None:
+    pqm_nbody_dataset = load_from_disk(args.dataset_dir_pqm_nbody)['train'].with_format('numpy')
+else:
+    pqm_nbody_dataset = load_dataset("cosmostat/neurips-wl-challenge", split="train").with_format('numpy')
 
 dataset_lognormal = load_from_disk(args.dataset_dir_logn_train)
 n = len(dataset_lognormal)
@@ -436,11 +439,33 @@ step = 0
 best_val_loss = float('inf')
 best_pqm_chi2 = float('inf')
 
-def _save_best_ckpt():
-    best_ckpt = str(ckpt_dir / "unet_best.pth")
+n_val_samples = 500
+
+def _run_validation_loss(model, n_samples, seed):
+    """Validation MSE over a fixed held-out set of n_samples, chunked through
+    the model in micro_bs pieces to avoid OOM."""
+    rng_eval = np.random.default_rng(seed)
+    ds_test_lognormal = get_iterable_dataset(test_dataset_lognormal, n_samples, 1)
+    ds_test_nbody = get_iterable_dataset(test_dataset_nbody, n_samples, 0)
+    batch_lognormal = next(ds_test_lognormal)
+    batch_nbody = next(ds_test_nbody)
+    batch = get_ot_batch([batch_lognormal, batch_nbody], rng_eval, eps, device, args.ot_reg, ot_method=args.ot_method)
+
+    total_loss = 0.0
+    total_n = 0
+    with torch.no_grad():
+        for mb in iter_microbatches(batch, micro_bs):
+            n_mb = mb['x0'].shape[0]
+            loss_mb = flow_matching_loss(model, mb['x0'], mb['x1'], mb['theta_x0'], mb['t'], sigma)
+            total_loss += float(loss_mb.detach().cpu().item()) * n_mb
+            total_n += n_mb
+    return total_loss / total_n
+
+def _save_best_ckpt(tag):
+    best_ckpt = str(ckpt_dir / f"unet_best_{tag}.pth")
     torch.save(unet.state_dict(), best_ckpt)
     try:
-        art = wandb.Artifact("unet-best", type="model")
+        art = wandb.Artifact(f"unet-best-{tag}", type="model")
         art.add_file(best_ckpt)
         wandb.log_artifact(art)
     except Exception:
@@ -478,27 +503,6 @@ while step < max_steps:
             if step % 500 == 0:
                 # basic scheduler step per epoch
                 scheduler.step()
-
-                rng_eval = np.random.default_rng(args.seed + 1234)
-                ds_test_lognormal = get_iterable_dataset(test_dataset_lognormal, micro_bs, 1)
-                ds_test_nbody = get_iterable_dataset(test_dataset_nbody, micro_bs, 0)
-                batch_lognormal = next(ds_test_lognormal)
-                batch_nbody = next(ds_test_nbody)
-                batch = get_ot_batch([batch_lognormal, batch_nbody], rng_eval, eps, device, args.ot_reg, ot_method=args.ot_method)
-
-                with torch.no_grad():
-                    lt = flow_matching_loss(unet, batch['x0'], batch['x1'], batch['theta_x0'], batch['t'], sigma)
-                    loss_t = float(lt.detach().cpu().item())
-
-                wandb.log({
-                    "val_loss": loss_t,
-                    "train_loss_epoch": float(loss),
-                    "epoch": epoch
-                })
-
-                if args.best_ckpt_metric == "val_loss" and loss_t < best_val_loss:
-                    best_val_loss = loss_t
-                    _save_best_ckpt()
 
             if step % nb_checkpoints == 0:
                 ds_test_lognormal = get_iterable_dataset(test_dataset_lognormal, micro_bs, 0)
@@ -563,17 +567,28 @@ while step < max_steps:
                     pass
                 plt.close(fig)
 
-            # PQMass evaluation at its own interval (controls best-checkpoint tracking)
+            # Validation loss + PQMass at the same interval, so both metrics are
+            # available together for best-checkpoint tracking.
             if step > 0 and step % pqm_step_interval == 0:
+                val_loss = _run_validation_loss(unet, n_val_samples, args.seed + 1234)
+                wandb.log({
+                    "val_loss": val_loss,
+                    "train_loss_epoch": float(loss),
+                    "epoch": epoch,
+                })
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    _save_best_ckpt("val_loss")
+
                 chi2_epoch = _run_pqm(
                     unet, f"step {step}", step,
                     fig_dir / f"pqm_unet_step_{step}.png",
                     "pqm/chi2_unet_mean", "pqm/plot_unet",
                     extra_log={"epoch": epoch},
                 )
-                if args.best_ckpt_metric == "pqm_chi2" and chi2_epoch is not None and chi2_epoch < best_pqm_chi2:
+                if chi2_epoch is not None and chi2_epoch < best_pqm_chi2:
                     best_pqm_chi2 = chi2_epoch
-                    _save_best_ckpt()
+                    _save_best_ckpt("pqm_chi2")
 
     epoch += 1
 pbar.close()
@@ -588,14 +603,19 @@ try:
 except Exception:
     pass
 
-# Post-training PQMass: evaluate both last and best checkpoints on a fixed test set
+# Post-training PQMass: evaluate last checkpoint plus both best-tracked checkpoints
 _run_pqm(unet, "last", 42, fig_dir / "pqm_final_last.png", "pqm/chi2_last_mean", "pqm/plot_last")
 
-best_ckpt_path = ckpt_dir / "unet_best.pth"
-if best_ckpt_path.exists():
-    unet_best = build_unet2d_condition_with_y(config).to(device)
-    unet_best.load_state_dict(torch.load(str(best_ckpt_path), map_location=device))
-    unet_best.eval()
-    _run_pqm(unet_best, "best", 42, fig_dir / "pqm_final_best.png", "pqm/chi2_best_mean", "pqm/plot_best")
+for tag in ("val_loss", "pqm_chi2"):
+    best_ckpt_path = ckpt_dir / f"unet_best_{tag}.pth"
+    if best_ckpt_path.exists():
+        unet_best = build_unet2d_condition_with_y(config).to(device)
+        unet_best.load_state_dict(torch.load(str(best_ckpt_path), map_location=device))
+        unet_best.eval()
+        _run_pqm(
+            unet_best, f"best_{tag}", 42,
+            fig_dir / f"pqm_final_best_{tag}.png",
+            f"pqm/chi2_best_{tag}_mean", f"pqm/plot_best_{tag}",
+        )
 
 wandb.finish()
