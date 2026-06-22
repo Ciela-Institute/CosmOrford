@@ -20,3 +20,8 @@ n_posterior_samples: 10000
 # Calibration validation (TARP + MIRA) — requires `pip install tarp mira_score`
 n_val_maps: 5000
 n_val_posterior_samples: 10000
+
+# flow architecture
+n_transforms: 5
+context_dim: 8
+hidden_dim: 64 
