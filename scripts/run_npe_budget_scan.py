@@ -38,10 +38,15 @@ class NPEConfig:
     npe_batch_size: int = 512
     npe_patience: int = 50
     npe_seeds: int = 5
+    n_transforms: int = 4
+    hidden_dim: int = 64
     n_posterior_samples: int = 10_000
     # Calibration validation (TARP + MIRA) on the flat dataset validation split
     n_val_maps: int = 500
     n_val_posterior_samples: int = 1000
+    # "ensemble" samples uniformly from all npe_seeds flows (better calibration);
+    # "best" samples only from the single lowest-val_nll flow (sharper, less robust)
+    inference_mode: str = "ensemble"
 
     @classmethod
     def from_yaml(cls, path: str) -> "NPEConfig":
@@ -332,6 +337,7 @@ def _train_budget_core(
 
     wandb.init(name=f"npe_budget_{budget}", **_wandb_kwargs)
     overall_best_nll = float("inf")
+    best_seed_idx = 0
 
     seed_states = []
 
@@ -414,7 +420,9 @@ def _train_budget_core(
         wandb.log({f"seed{seed+1}/best_val_nll": best_val_nll})
 
         seed_states.append(best_state)
-        overall_best_nll = min(overall_best_nll, best_val_nll)
+        if best_val_nll < overall_best_nll:
+            overall_best_nll = best_val_nll
+            best_seed_idx = seed
 
     # Build an ensemble from every seed's best checkpoint instead of keeping only the
     # seed with lowest val_nll. Picking a single "best-by-val_nll" flow selects for
@@ -433,20 +441,76 @@ def _train_budget_core(
         f.eval()
         ensemble_flows.append(f)
     best_val_nll = overall_best_nll
-    print(
-        f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
-        f"(sampling from ensemble of all {len(ensemble_flows)} seeds)"
-    )
 
-    def _ensemble_sample(n_samples, context):
-        """Draw n_samples total from a uniform mixture over the seed ensemble."""
-        n_members = len(ensemble_flows)
-        counts = [n_samples // n_members] * n_members
-        counts[0] += n_samples - sum(counts)
+    def _fit_mixture_weights(flows, n_iter=500, tol=1e-7):
+        """Mixture weights (on the simplex) that minimize the NLL of `flows` on
+        the shared (s_val, t_val) split, with the per-flow log_probs held fixed.
+
+        For fixed components, -log(sum_k w_k p_k) is convex in w, so this is a
+        convex problem with a unique global optimum; EM (fixed-point iteration
+        on the responsibilities) converges to it monotonically.
+        """
+        with torch.no_grad():
+            s_val_n = _normalize_context(s_val.to(device))
+            t_val_d = t_val.to(device)
+            log_p = torch.stack(
+                [f.log_prob(t_val_d, context=s_val_n) for f in flows], dim=0
+            )  # (K, N)
+
+        n_members = log_p.shape[0]
+        w = torch.full((n_members,), 1.0 / n_members, device=log_p.device)
+        nll_uniform = -torch.logsumexp(
+            log_p - np.log(n_members), dim=0
+        ).mean().item()
+        for _ in range(n_iter):
+            log_joint = torch.log(w.clamp_min(1e-12)).unsqueeze(1) + log_p  # (K, N)
+            resp = torch.softmax(log_joint, dim=0)  # responsibilities, (K, N)
+            w_new = resp.mean(dim=1)
+            w_new = w_new / w_new.sum()
+            if torch.max(torch.abs(w_new - w)) < tol:
+                w = w_new
+                break
+            w = w_new
+        nll_fitted = -torch.logsumexp(
+            torch.log(w.clamp_min(1e-12)).unsqueeze(1) + log_p, dim=0
+        ).mean().item()
+        print(
+            f"  Mixture weight fit: val NLL uniform={nll_uniform:.4f} -> "
+            f"fitted={nll_fitted:.4f}"
+        )
+        print(f"  Fitted weights: {np.round(w.cpu().numpy(), 4).tolist()}")
+        return w.cpu().numpy()
+
+    # cfg.inference_mode selects which trained seed(s) are actually used to draw
+    # posterior samples for FoM/calibration; "best" keeps only the single
+    # lowest-val_nll flow, "ensemble" pools all seeds (see NPEConfig docstring above)
+    # weighted by `mixture_weights`, fit to minimize NLL on the validation split.
+    if cfg.inference_mode == "best":
+        inference_flows = [ensemble_flows[best_seed_idx]]
+        mixture_weights = np.array([1.0])
+        print(
+            f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
+            f"(inference_mode='best': sampling only from seed {best_seed_idx + 1})"
+        )
+    else:
+        inference_flows = ensemble_flows
+        mixture_weights = _fit_mixture_weights(inference_flows)
+        print(
+            f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
+            f"(inference_mode='ensemble': sampling from all "
+            f"{len(inference_flows)} seeds, weights fit to minimize val NLL)"
+        )
+
+    def _sample_posterior(n_samples, context):
+        """Draw n_samples total from the mixture over `inference_flows`, with
+        component counts drawn from `mixture_weights` (uniform unless fitted)."""
+        if len(inference_flows) == 1:
+            return inference_flows[0].sample(n_samples, context=context)
+        counts = np.random.multinomial(n_samples, mixture_weights)
         return torch.cat(
             [
-                f.sample(c, context=context)
-                for f, c in zip(ensemble_flows, counts)
+                f.sample(int(c), context=context)
+                for f, c in zip(inference_flows, counts)
                 if c > 0
             ],
             dim=1,
@@ -484,7 +548,15 @@ def _train_budget_core(
     # RegressionModelNoPatch.validation_step
     mse_values = []
     score_values = []
+    # Same MSE/score formula but computed from the NF posterior mean/std
+    # (samples_phys, respecting cfg.inference_mode) instead of the regression head.
+    mse_nf_values = []
+    score_nf_values = []
     all_posterior_samples = []  # (n_maps, n_posterior_samples, 2) in physical units
+    # Per-observation, per-seed posterior samples for the first n_plot fiducial maps,
+    # used to diagnose how much the individual NFs disagree (wandb diagnostic plot).
+    n_plot = min(5, len(kappa_all_fom))
+    per_seed_posterior_samples = []  # (n_plot, npe_seeds, n_posterior_samples, 2)
     with torch.no_grad():
         for i, kappa_i in enumerate(kappa_all_fom):
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
@@ -496,12 +568,20 @@ def _train_budget_core(
             s = _normalize_context(s)
 
             # Sample posterior
-            samples = _ensemble_sample(cfg.n_posterior_samples, s)  # (1, N, 2)
+            samples = _sample_posterior(cfg.n_posterior_samples, s)  # (1, N, 2)
             samples = samples.squeeze(0).cpu().numpy()  # (N, 2)
 
             # Unnormalize to physical parameters
             samples_phys = samples * THETA_STD[:2] + THETA_MEAN[:2]
             all_posterior_samples.append(samples_phys)
+
+            if i < n_plot:
+                per_seed_samples_phys = []
+                for f in ensemble_flows:
+                    s_i = f.sample(cfg.n_posterior_samples, context=s)
+                    s_i = s_i.squeeze(0).cpu().numpy()
+                    per_seed_samples_phys.append(s_i * THETA_STD[:2] + THETA_MEAN[:2])
+                per_seed_posterior_samples.append(per_seed_samples_phys)
 
             # Compute FoM = 1 / sqrt(det(Cov))
             cov = np.cov(samples_phys.T)  # (2, 2)
@@ -542,6 +622,30 @@ def _train_budget_core(
             score_values.append(score_i.item())
             mse_values.append(mse_i.item())
 
+            # NF-based mse/score: same formula, but mean/std always taken from the
+            # flow posterior samples (ensemble or best, per cfg.inference_mode),
+            # regardless of compressor.hparams.use_flow.
+            mean_phys_nf = (
+                torch.from_numpy(samples_phys.mean(axis=0))
+                .to(device, dtype=torch.float32)
+                .unsqueeze(0)
+            )
+            std_phys_nf = (
+                torch.from_numpy(samples_phys.std(axis=0))
+                .to(device, dtype=torch.float32)
+                .unsqueeze(0)
+            )
+            sq_error_nf = (y_phys - mean_phys_nf) ** 2
+            score_nf_i = -torch.sum(
+                sq_error_nf / std_phys_nf**2
+                + torch.log(std_phys_nf**2)
+                + 1000.0 * sq_error_nf,
+                dim=1,
+            )
+            mse_nf_i = F.mse_loss(mean_phys_nf, y_phys)
+            score_nf_values.append(score_nf_i.item())
+            mse_nf_values.append(mse_nf_i.item())
+
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
@@ -552,6 +656,15 @@ def _train_budget_core(
     score_std = np.std(score_values)
     print(f"  MSE = {mse_mean:.6f} ± {mse_std:.6f}")
     print(f"  Score = {score_mean:.2f} ± {score_std:.2f}")
+
+    mse_nf_mean = np.mean(mse_nf_values)
+    mse_nf_std = np.std(mse_nf_values)
+    score_nf_mean = np.mean(score_nf_values)
+    score_nf_std = np.std(score_nf_values)
+    print(f"  MSE (NF, {cfg.inference_mode}) = {mse_nf_mean:.6f} ± {mse_nf_std:.6f}")
+    print(
+        f"  Score (NF, {cfg.inference_mode}) = {score_nf_mean:.2f} ± {score_nf_std:.2f}"
+    )
 
     # ── 7. Save results ──
     torch.save(seed_states, results_dir / "npe_flow_ensemble.pt")
@@ -565,6 +678,14 @@ def _train_budget_core(
         f"(shape {posterior_samples_arr.shape})"
     )
 
+    # Save per-seed posterior samples for the diagnostic plot:
+    # shape (n_plot, npe_seeds, n_posterior_samples, 2)
+    per_seed_samples_arr = np.stack(
+        [np.stack(obs_samples, axis=0) for obs_samples in per_seed_posterior_samples],
+        axis=0,
+    )
+    np.save(results_dir / "per_seed_posterior_samples.npy", per_seed_samples_arr)
+
     results = {
         "budget": budget,
         "fom_mean": float(fom_mean),
@@ -576,15 +697,27 @@ def _train_budget_core(
         "score_mean": float(score_mean),
         "score_std": float(score_std),
         "score_values": [float(v) for v in score_values],
+        "mse_nf_mean": float(mse_nf_mean),
+        "mse_nf_std": float(mse_nf_std),
+        "mse_nf_values": [float(v) for v in mse_nf_values],
+        "score_nf_mean": float(score_nf_mean),
+        "score_nf_std": float(score_nf_std),
+        "score_nf_values": [float(v) for v in score_nf_values],
         "best_val_nll": float(best_val_nll),
         "n_noise_realizations": cfg.n_noise_realizations,
         "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": cfg.n_posterior_samples,
         "compressor_checkpoint": ckpt_path,
+        "inference_mode": cfg.inference_mode,
+        "best_seed_idx": best_seed_idx,
+        "mixture_weights": [float(w) for w in mixture_weights],
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
-    # ── 8. GetDist posterior plot ──
+    # ── 8. GetDist posterior plot: one panel per fiducial observation, each panel
+    # overlaying the per-seed NF posteriors (not the pooled ensemble draw) so that
+    # seed-to-seed disagreement is visible. Axes are fixed to the requested
+    # Omega_m/S_8 ranges instead of showing the (much wider) prior box.
     import matplotlib
 
     matplotlib.use("Agg")
@@ -592,51 +725,88 @@ def _train_budget_core(
     from getdist import MCSamples
     from getdist import plots as gdplots
 
-    # Prior bounds from the challenge dataset
-    PRIOR_BOUNDS = {
-        "Omega_m": (0.0913, 0.6190),
-        "S_8": (0.6801, 0.9552),
-    }
+    OMEGA_M_LIM = (0.1, 0.6)
+    S8_LIM = (0.7, 0.95)
     fiducial_omega_m = THETA_MEAN[0]
     fiducial_s8 = THETA_MEAN[1]
 
-    # Build a flat prior MCSamples so getdist renders it as a box
-    n_prior = 50_000
-    prior_samples = np.column_stack(
-        [
-            np.random.uniform(*PRIOR_BOUNDS["Omega_m"], size=n_prior),
-            np.random.uniform(*PRIOR_BOUNDS["S_8"], size=n_prior),
-        ]
-    )
-    mc_prior = MCSamples(
-        samples=prior_samples,
-        names=["Omega_m", "S_8"],
-        labels=[r"\Omega_m", r"S_8"],
-        label="Prior",
-    )
-
-    n_plot = min(5, len(all_posterior_samples))
-    mc_list = [mc_prior]
+    g = gdplots.get_subplot_plotter(subplot_size=3.5)
+    # Default getdist line_styles only has 12 entries; with npe_seeds > 12 (one
+    # line per seed per panel) plot_2d raises IndexError, so extend the palette.
+    n_seeds_plot = len(ensemble_flows)
+    if n_seeds_plot > len(g.settings.line_styles):
+        cmap = matplotlib.colormaps["tab20"]
+        g.settings.line_styles = [("-", cmap(j % 20)) for j in range(n_seeds_plot)]
+    g.make_figure(n_plot, nx=n_plot)
     for i in range(n_plot):
-        mc = MCSamples(
-            samples=all_posterior_samples[i],
-            names=["Omega_m", "S_8"],
-            labels=[r"\Omega_m", r"S_8"],
-            label=f"obs {i+1}",
+        mc_list = [
+            MCSamples(
+                samples=per_seed_posterior_samples[i][seed_idx],
+                names=["Omega_m", "S_8"],
+                labels=[r"\Omega_m", r"S_8"],
+                label=f"seed {seed_idx+1}",
+            )
+            for seed_idx in range(len(ensemble_flows))
+        ]
+        ax = g._subplot_number(i)
+        g.plot_2d(
+            mc_list, "Omega_m", "S_8", filled=False, ax=ax, add_legend_proxy=(i == 0)
         )
-        mc_list.append(mc)
-
-    g = gdplots.get_subplot_plotter()
-    g.triangle_plot(mc_list, filled=False, legend_loc="upper right")
-    # Mark fiducial cosmology on all subplots
-    for ax in g.subplots.flat:
-        if ax is not None:
-            ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
-            ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_xlim(*OMEGA_M_LIM)
+        ax.set_ylim(*S8_LIM)
+        ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_title(f"obs {i+1}", fontsize=9)
+    g.add_legend(
+        [f"seed {seed_idx+1}" for seed_idx in range(len(ensemble_flows))],
+        legend_loc="lower left",
+        ax=g._subplot_number(0),
+        fontsize=8,
+        legend_ncol=2 if n_seeds_plot > 6 else 1,
+    )
 
     plot_path = results_dir / "posterior_plot.png"
     g.export(str(plot_path))
     print(f"Posterior plot saved to {plot_path}")
+
+    # ── 8b. GetDist posterior plot: one panel per fiducial observation, each
+    # showing the single final mixture posterior (all_posterior_samples), i.e.
+    # what FoM/calibration actually use -- as opposed to the per-seed breakdown
+    # in the plot above.
+    g_ens = gdplots.get_subplot_plotter(subplot_size=3.5)
+    g_ens.make_figure(n_plot, nx=n_plot)
+    for i in range(n_plot):
+        mc_ens = MCSamples(
+            samples=all_posterior_samples[i],
+            names=["Omega_m", "S_8"],
+            labels=[r"\Omega_m", r"S_8"],
+            label="ensemble posterior",
+        )
+        ax = g_ens._subplot_number(i)
+        g_ens.plot_2d(
+            [mc_ens],
+            "Omega_m",
+            "S_8",
+            filled=True,
+            ax=ax,
+            add_legend_proxy=(i == 0),
+        )
+        ax.set_xlim(*OMEGA_M_LIM)
+        ax.set_ylim(*S8_LIM)
+        ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_title(f"obs {i+1}", fontsize=9)
+
+    ensemble_plot_path = results_dir / "ensemble_posterior_plot.png"
+    g_ens.export(str(ensemble_plot_path))
+    print(f"Ensemble posterior plot saved to {ensemble_plot_path}")
+
+    # Mixture weights as a single bar-chart panel (one bar per seed) instead of
+    # npe_seeds separate scalar metrics.
+    weights_table = wandb.Table(
+        data=[[f"seed{k+1}", float(w)] for k, w in enumerate(mixture_weights)],
+        columns=["seed", "weight"],
+    )
 
     wandb.log(
         {
@@ -646,8 +816,16 @@ def _train_budget_core(
             "mse_std": mse_std,
             "score_mean": score_mean,
             "score_std": score_std,
+            "mse_nf_mean": mse_nf_mean,
+            "mse_nf_std": mse_nf_std,
+            "score_nf_mean": score_nf_mean,
+            "score_nf_std": score_nf_std,
             "best_val_nll": best_val_nll,
-            "best_seed/posterior_plot": wandb.Image(str(plot_path)),
+            "per_seed_posterior_plot": wandb.Image(str(plot_path)),
+            "ensemble_posterior_plot": wandb.Image(str(ensemble_plot_path)),
+            "mixture_weights_plot": wandb.plot.bar(
+                weights_table, "seed", "weight", title="Mixture weights"
+            ),
         }
     )
 
@@ -674,7 +852,7 @@ def _train_budget_core(
             with _torch.no_grad():
                 for i in range(n):
                     s_i = summaries_t[i : i + 1].to(device)
-                    samps = _ensemble_sample(
+                    samps = _sample_posterior(
                         cfg.n_val_posterior_samples, s_i
                     )  # (1, S, 2)
                     posterior.append(samps.squeeze(0).cpu().numpy())
@@ -965,11 +1143,21 @@ if __name__ == "__main__":
         default=False,
         type=bool,
     )
+    parser.add_argument(
+        "--inference_mode",
+        choices=["ensemble", "best"],
+        default=None,
+        help="'ensemble' samples from a uniform mixture over all npe_seeds flows; "
+        "'best' samples only from the single lowest-val_nll flow "
+        "(overrides the config file value)",
+    )
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
     if args.budgets is not None:
         cfg.budgets = [int(b) for b in args.budgets.split(",")]
+    if args.inference_mode is not None:
+        cfg.inference_mode = args.inference_mode
 
     holdout_ds = load_from_disk(args.holdout_path)
     flat_ds = load_from_disk(args.flat_dataset_path) if args.flat_dataset_path else None
