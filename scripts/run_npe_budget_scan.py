@@ -20,35 +20,46 @@ Usage (local):
 
     All training hyperparameters are read from --config (YAML file).
 """
+
 from dataclasses import dataclass, field
+from glob import glob
 from pathlib import Path
 from typing import List
-from glob import glob
 
 
 @dataclass
 class NPEConfig:
-    budgets: List[int] = field(default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200])
+    budgets: List[int] = field(
+        default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200]
+    )
     n_noise_realizations: int = 1
     npe_epochs: int = 500
     npe_lr: float = 1e-3
     npe_batch_size: int = 512
     npe_patience: int = 50
     npe_seeds: int = 5
+    n_transforms: int = 4
+    hidden_dim: int = 64
     n_posterior_samples: int = 10_000
     # Calibration validation (TARP + MIRA) on the flat dataset validation split
     n_val_maps: int = 500
     n_val_posterior_samples: int = 1000
+    # "ensemble" samples uniformly from all npe_seeds flows (better calibration);
+    # "best" samples only from the single lowest-val_nll flow (sharper, less robust)
+    inference_mode: str = "ensemble"
 
     @classmethod
     def from_yaml(cls, path: str) -> "NPEConfig":
         import yaml
+
         with open(path) as f:
             data = yaml.safe_load(f)
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
-def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = False) -> str:
+def find_best_checkpoint(
+    budget: int, checkpoints_path: Path, offline: bool = False
+) -> str:
     """Find the best compressor checkpoint for a given budget.
 
     Strategy:
@@ -63,27 +74,39 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     # print(checkpoints)
     checkpoints = glob(checkpoints + "/**/*.ckpt", recursive=True)
 
-    # for ckpt in checkpoint_dir.glob("*.ckpt"): 
+    # for ckpt in checkpoint_dir.glob("*.ckpt"):
     #     print(ckpt)
-    # Strategy 1: Parse val_mse from checkpoint filenames
+    # Strategy 1: Parse the monitored val loss from checkpoint filenames, pick lowest.
+    # Filenames are written as "step=<N>-<metric>=<value>.ckpt"; the metric name varies
+    # (val_log_prob for the Gaussian-head loss, val_nll for use_flow=True) depending on
+    # which training config produced the checkpoint, so try both. If the parsed values
+    # are degenerate (e.g. older runs whose filename embeds a metric that was never
+    # logged for that hparams.use_flow setting, so every checkpoint shows the same
+    # placeholder value), the metric carries no information -- break ties by picking
+    # the highest training step instead of silently keeping whichever file glob()
+    # happened to list first.
     if checkpoint_dir.exists():
-        best_path = None
-        best_logp = float("inf")
-
+        candidates = []  # (loss_value, step, path)
         for ckpt in checkpoints:
             print(ckpt)
-            if ckpt == "last.ckpt":
+            if Path(ckpt).name == "last.ckpt":
                 continue
-            # match = re.search(r"val_log_prob=([\d.]+)", ckpt)
-            match = re.search(r"val_log_prob=([-+]?\d*\.?\d+)", ckpt)
-            if match:
-                logp = float(match.group(1))
-                if logp < best_logp:
-                    best_logp = logp
-                    best_path = str(ckpt)
+            match = re.search(r"val_(?:log_prob|nll)=([-+]?\d*\.?\d+)", ckpt)
+            step_match = re.search(r"step=(\d+)", ckpt)
+            if match and step_match:
+                candidates.append(
+                    (float(match.group(1)), int(step_match.group(1)), str(ckpt))
+                )
 
-        if best_path is not None:
-            print(f"Found best checkpoint for budget-{budget}: {best_path} (val_log_prob={best_logp:.6f})")
+        if candidates:
+            best_loss = min(c[0] for c in candidates)
+            tied = [c for c in candidates if c[0] == best_loss]
+            best_loss, best_step, best_path = max(tied, key=lambda c: c[1])
+            print(
+                f"Found best checkpoint for budget-{budget}: {best_path} "
+                f"(val_loss={best_loss:.6f}, step={best_step}, "
+                f"{len(tied)}/{len(candidates)} tied)"
+            )
             return best_path
 
         # Strategy 2: Fall back to last.ckpt
@@ -118,7 +141,18 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None, load_flat_val=None, context_normalization: bool = False):
+def _train_budget_core(
+    budget: int,
+    checkpoints_path,
+    npe_results_path,
+    summaries_cache_path,
+    load_holdout,
+    cfg: NPEConfig,
+    offline: bool = False,
+    vol=None,
+    load_flat_val=None,
+    context_normalization: bool = False,
+):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -128,22 +162,23 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         summaries_cache_path: Path for caching pre-computed summaries
         load_holdout: callable(split: str) -> HuggingFace Dataset
         cfg: NPEConfig with all training hyperparameters
-        offline: if True, disable W&B checkpoint fallback and raise if no local checkpoint found
-        vol: optional modal.Volume; if provided, .reload()/.commit() are called around I/O
+        offline: if True, disable W&B checkpoint fallback and raise if no local
+            checkpoint found
+        vol: optional modal.Volume; if provided, .reload()/.commit() are called
+            around I/O
         context_normalization: if True, enable context normalization
     """
     import json
+    import os
 
     import numpy as np
     import torch
     import torch.nn.functional as F
 
-    from cosmoford import NOISE_STD, THETA_MEAN, THETA_STD
+    import wandb
+    from cosmoford import THETA_MEAN, THETA_STD
     from cosmoford.dataset import reshape_field_numpy
     from cosmoford.models_nopatch import RegressionModelNoPatch, build_flow
-
-    import os
-    import wandb
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*60}")
@@ -184,13 +219,17 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         thetas_tensor = cached["thetas"]
         theta_all = cached["theta_all_raw"]  # unnormalized, for FoM eval
         ckpt_path = cached["compressor_checkpoint"]
-        print(f"Loaded {summaries_tensor.shape[0]} cached pairs (compressor: {ckpt_path})")
+        print(
+            f"Loaded {summaries_tensor.shape[0]} cached pairs (compressor: {ckpt_path})"
+        )
     else:
         print("No cached summaries found, computing from scratch...")
 
         # ── 1. Load frozen compressor ──
         ckpt_path = find_best_checkpoint(budget, checkpoints_path, offline=offline)
-        compressor = RegressionModelNoPatch.load_from_checkpoint(ckpt_path, map_location=device)
+        compressor = RegressionModelNoPatch.load_from_checkpoint(
+            ckpt_path, map_location=device
+        )
         compressor.eval()
         compressor.to(device)
         for p in compressor.parameters():
@@ -212,22 +251,24 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         n_maps = len(kappa_all)
         print(f"Holdout: {n_maps} maps")
 
-        # Build mask (same as model uses)
-        from cosmoford import SURVEY_MASK
-        mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
-
         # ── 3. Pre-compute summaries with noise augmentation ──
-        print(f"Pre-computing summaries ({cfg.n_noise_realizations} noise realizations per map)...")
+        print(
+            f"Pre-computing summaries "
+            f"({cfg.n_noise_realizations} noise realizations per map)..."
+        )
         all_summaries = []
         all_thetas = []
 
         with torch.no_grad():
             for i in range(n_maps):
                 kappa_i = kappa_all[i]  # (1424, 176)
-                kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
+                kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[
+                    0
+                ]  # (1834, 88)
 
                 for _ in range(cfg.n_noise_realizations):
-                    noisy = kappa_reshaped # kappa maps from the holdout dataset are already noisy and masked
+                    # kappa maps from the holdout dataset are already noisy and masked
+                    noisy = kappa_reshaped
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
                     s = compressor.compress(x)  # (1, 8)
                     all_summaries.append(s.cpu())
@@ -241,13 +282,16 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
         # Cache to disk
         cache_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            "summaries": summaries_tensor,
-            "thetas": thetas_tensor,
-            "theta_all_raw": theta_all,
-            "compressor_checkpoint": ckpt_path,
-            "n_noise_realizations": cfg.n_noise_realizations,
-        }, cache_file)
+        torch.save(
+            {
+                "summaries": summaries_tensor,
+                "thetas": thetas_tensor,
+                "theta_all_raw": theta_all,
+                "compressor_checkpoint": ckpt_path,
+                "n_noise_realizations": cfg.n_noise_realizations,
+            },
+            cache_file,
+        )
         if vol is not None:
             vol.commit()
         print(f"Cached summaries to {cache_file}")
@@ -268,10 +312,10 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     s_val, t_val = summaries_tensor[val_idx], thetas_tensor[val_idx]
     print(f"Train: {n_train}, Val: {n_val}")
 
-    # Context normalization stats, computed once from the training split. Must be applied
-    # consistently everywhere a context summary is fed to the flow (train, val, FoM eval,
-    # TARP/MIRA calibration) — not just during training — since the flow is trained to expect
-    # normalized context when context_normalization=True.
+    # Context normalization stats, computed once from the training split. Must be
+    # applied consistently everywhere a context summary is fed to the flow (train,
+    # val, FoM eval, TARP/MIRA calibration) — not just during training — since the
+    # flow is trained to expect normalized context when context_normalization=True.
     ctx_mean = s_train.mean(dim=0, keepdim=True) if context_normalization else None
     ctx_std = s_train.std(dim=0, keepdim=True) if context_normalization else None
 
@@ -282,7 +326,9 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
     train_dataset = torch.utils.data.TensorDataset(s_train, t_train)
     val_dataset = torch.utils.data.TensorDataset(s_val, t_val)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.npe_batch_size, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=cfg.npe_batch_size, shuffle=True
+    )
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.npe_batch_size)
 
     # ── 5. Train NPE (multiple seeds, keep best) ──
@@ -291,15 +337,24 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
 
     wandb.init(name=f"npe_budget_{budget}", **_wandb_kwargs)
     overall_best_nll = float("inf")
-    overall_best_state = None
+    best_seed_idx = 0
+
+    seed_states = []
 
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
 
-        torch.manual_seed(seed + 42)
-        flow = build_flow(param_dim=2, context_dim=8).to(device)
+        torch.manual_seed(seed + 92)
+        flow = build_flow(
+            param_dim=2,
+            context_dim=8,
+            n_transforms=cfg.n_transforms,
+            hidden_dim=cfg.hidden_dim,
+        ).to(device)
         optimizer = torch.optim.Adam(flow.parameters(), lr=cfg.npe_lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.npe_epochs)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cfg.npe_epochs
+        )
 
         best_val_nll = float("inf")
         patience_counter = 0
@@ -327,17 +382,21 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 for s_batch, t_batch in val_loader:
                     s_batch, t_batch = s_batch.to(device), t_batch.to(device)
                     s_batch = _normalize_context(s_batch)
-                    val_losses.append(-flow.log_prob(t_batch, context=s_batch).mean().item())
+                    val_losses.append(
+                        -flow.log_prob(t_batch, context=s_batch).mean().item()
+                    )
 
             mean_train = np.mean(train_losses)
             mean_val = np.mean(val_losses)
 
-            wandb.log({
-                f"seed{seed+1}/train_nll": mean_train,
-                f"seed{seed+1}/val_nll": mean_val,
-                f"seed{seed+1}/lr": optimizer.param_groups[0]['lr'],
-                f"seed{seed+1}/epoch": epoch,
-            })
+            wandb.log(
+                {
+                    f"seed{seed+1}/train_nll": mean_train,
+                    f"seed{seed+1}/val_nll": mean_val,
+                    f"seed{seed+1}/lr": optimizer.param_groups[0]["lr"],
+                    f"seed{seed+1}/epoch": epoch,
+                }
+            )
 
             if mean_val < best_val_nll:
                 best_val_nll = mean_val
@@ -347,8 +406,11 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 patience_counter += 1
 
             if (epoch + 1) % 50 == 0 or patience_counter == 0:
-                print(f"  Epoch {epoch+1:3d}: train_nll={mean_train:.4f}, val_nll={mean_val:.4f}, "
-                      f"best={best_val_nll:.4f}, patience={patience_counter}/{cfg.npe_patience}")
+                print(
+                    f"  Epoch {epoch+1:3d}: train_nll={mean_train:.4f}, "
+                    f"val_nll={mean_val:.4f}, best={best_val_nll:.4f}, "
+                    f"patience={patience_counter}/{cfg.npe_patience}"
+                )
 
             if patience_counter >= cfg.npe_patience:
                 print(f"  Early stopping at epoch {epoch+1}")
@@ -357,29 +419,118 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         print(f"  Seed {seed+1} best val NLL: {best_val_nll:.4f}")
         wandb.log({f"seed{seed+1}/best_val_nll": best_val_nll})
 
+        seed_states.append(best_state)
         if best_val_nll < overall_best_nll:
             overall_best_nll = best_val_nll
-            overall_best_state = best_state
+            best_seed_idx = seed
 
-    # Restore overall best model
-    flow = build_flow(param_dim=2, context_dim=8).to(device)
-    flow.load_state_dict(overall_best_state)
-    flow.eval()
+    # Build an ensemble from every seed's best checkpoint instead of keeping only the
+    # seed with lowest val_nll. Picking a single "best-by-val_nll" flow selects for
+    # sharpness, not calibration, which is why MIRA/TARP coverage drifted inconsistently
+    # across budgets; sampling from a uniform mixture over the ensemble (a standard
+    # deep-ensemble calibration trick) damps that per-seed overfitting noise.
+    ensemble_flows = []
+    for state in seed_states:
+        f = build_flow(
+            param_dim=2,
+            context_dim=8,
+            n_transforms=cfg.n_transforms,
+            hidden_dim=cfg.hidden_dim,
+        ).to(device)
+        f.load_state_dict(state)
+        f.eval()
+        ensemble_flows.append(f)
     best_val_nll = overall_best_nll
-    print(f"\nOverall best val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f}")
+
+    def _fit_mixture_weights(flows, n_iter=500, tol=1e-7):
+        """Mixture weights (on the simplex) that minimize the NLL of `flows` on
+        the shared (s_val, t_val) split, with the per-flow log_probs held fixed.
+
+        For fixed components, -log(sum_k w_k p_k) is convex in w, so this is a
+        convex problem with a unique global optimum; EM (fixed-point iteration
+        on the responsibilities) converges to it monotonically.
+        """
+        with torch.no_grad():
+            s_val_n = _normalize_context(s_val.to(device))
+            t_val_d = t_val.to(device)
+            log_p = torch.stack(
+                [f.log_prob(t_val_d, context=s_val_n) for f in flows], dim=0
+            )  # (K, N)
+
+        n_members = log_p.shape[0]
+        w = torch.full((n_members,), 1.0 / n_members, device=log_p.device)
+        nll_uniform = -torch.logsumexp(
+            log_p - np.log(n_members), dim=0
+        ).mean().item()
+        for _ in range(n_iter):
+            log_joint = torch.log(w.clamp_min(1e-12)).unsqueeze(1) + log_p  # (K, N)
+            resp = torch.softmax(log_joint, dim=0)  # responsibilities, (K, N)
+            w_new = resp.mean(dim=1)
+            w_new = w_new / w_new.sum()
+            if torch.max(torch.abs(w_new - w)) < tol:
+                w = w_new
+                break
+            w = w_new
+        nll_fitted = -torch.logsumexp(
+            torch.log(w.clamp_min(1e-12)).unsqueeze(1) + log_p, dim=0
+        ).mean().item()
+        print(
+            f"  Mixture weight fit: val NLL uniform={nll_uniform:.4f} -> "
+            f"fitted={nll_fitted:.4f}"
+        )
+        print(f"  Fitted weights: {np.round(w.cpu().numpy(), 4).tolist()}")
+        return w.cpu().numpy()
+
+    # cfg.inference_mode selects which trained seed(s) are actually used to draw
+    # posterior samples for FoM/calibration; "best" keeps only the single
+    # lowest-val_nll flow, "ensemble" pools all seeds (see NPEConfig docstring above)
+    # weighted by `mixture_weights`, fit to minimize NLL on the validation split.
+    if cfg.inference_mode == "best":
+        inference_flows = [ensemble_flows[best_seed_idx]]
+        mixture_weights = np.array([1.0])
+        print(
+            f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
+            f"(inference_mode='best': sampling only from seed {best_seed_idx + 1})"
+        )
+    else:
+        inference_flows = ensemble_flows
+        mixture_weights = _fit_mixture_weights(inference_flows)
+        print(
+            f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
+            f"(inference_mode='ensemble': sampling from all "
+            f"{len(inference_flows)} seeds, weights fit to minimize val NLL)"
+        )
+
+    def _sample_posterior(n_samples, context):
+        """Draw n_samples total from the mixture over `inference_flows`, with
+        component counts drawn from `mixture_weights` (uniform unless fitted)."""
+        if len(inference_flows) == 1:
+            return inference_flows[0].sample(n_samples, context=context)
+        counts = np.random.multinomial(n_samples, mixture_weights)
+        return torch.cat(
+            [
+                f.sample(int(c), context=context)
+                for f, c in zip(inference_flows, counts)
+                if c > 0
+            ],
+            dim=1,
+        )
 
     # ── 6. Compute FoM at fiducial cosmology ──
     print("Computing FoM (all fiducial maps)...")
 
     # Load compressor for FoM eval if not already loaded (cache path)
     if compressor is None:
-        compressor = RegressionModelNoPatch.load_from_checkpoint(ckpt_path, map_location=device)
+        compressor = RegressionModelNoPatch.load_from_checkpoint(
+            ckpt_path, map_location=device
+        )
         compressor.eval()
         compressor.to(device)
         for p in compressor.parameters():
             p.requires_grad = False
 
-    # Load fiducial kappa maps directly (split='fiducial' contains only fiducial cosmology maps)
+    # Load fiducial kappa maps directly (split='fiducial' has only fiducial
+    # cosmology maps)
     print("Loading fiducial maps for FoM evaluation...")
     holdout = load_holdout("fiducial")
     holdout = holdout.with_format("numpy")
@@ -388,30 +539,49 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
     from cosmoford import SURVEY_MASK
-    mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
 
     theta_mean_t = torch.tensor(THETA_MEAN[:2], device=device, dtype=torch.float32)
     theta_std_t = torch.tensor(THETA_STD[:2], device=device, dtype=torch.float32)
 
     fom_values = []
-    mse_values = []  # compressor regression-head MSE, same formula as RegressionModelNoPatch.validation_step
-    score_values = []  # compressor regression-head score, same formula as RegressionModelNoPatch.validation_step
+    # compressor regression-head MSE/score, same formula as
+    # RegressionModelNoPatch.validation_step
+    mse_values = []
+    score_values = []
+    # Same MSE/score formula but computed from the NF posterior mean/std
+    # (samples_phys, respecting cfg.inference_mode) instead of the regression head.
+    mse_nf_values = []
+    score_nf_values = []
     all_posterior_samples = []  # (n_maps, n_posterior_samples, 2) in physical units
+    # Per-observation, per-seed posterior samples for the first n_plot fiducial maps,
+    # used to diagnose how much the individual NFs disagree (wandb diagnostic plot).
+    n_plot = min(5, len(kappa_all_fom))
+    per_seed_posterior_samples = []  # (n_plot, npe_seeds, n_posterior_samples, 2)
     with torch.no_grad():
         for i, kappa_i in enumerate(kappa_all_fom):
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
             noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
-            mean_raw, std_raw, s = compressor(x)  # mean/std in normalized parameter space, s: (1, 8)
+            mean_raw, std_raw, s = compressor(
+                x
+            )  # mean/std in normalized parameter space, s: (1, 8)
             s = _normalize_context(s)
 
             # Sample posterior
-            samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
+            samples = _sample_posterior(cfg.n_posterior_samples, s)  # (1, N, 2)
             samples = samples.squeeze(0).cpu().numpy()  # (N, 2)
 
             # Unnormalize to physical parameters
             samples_phys = samples * THETA_STD[:2] + THETA_MEAN[:2]
             all_posterior_samples.append(samples_phys)
+
+            if i < n_plot:
+                per_seed_samples_phys = []
+                for f in ensemble_flows:
+                    s_i = f.sample(cfg.n_posterior_samples, context=s)
+                    s_i = s_i.squeeze(0).cpu().numpy()
+                    per_seed_samples_phys.append(s_i * THETA_STD[:2] + THETA_MEAN[:2])
+                per_seed_posterior_samples.append(per_seed_samples_phys)
 
             # Compute FoM = 1 / sqrt(det(Cov))
             cov = np.cov(samples_phys.T)  # (2, 2)
@@ -422,15 +592,59 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 fom = 0.0
             fom_values.append(fom)
 
-            # Compressor regression-head mse/score against the true fiducial theta
-            y_phys = torch.tensor(theta_all_fom[i, :2], device=device, dtype=torch.float32).unsqueeze(0)
-            mean_phys = mean_raw * theta_std_t + theta_mean_t
-            std_phys = std_raw * theta_std_t
+            # Compressor regression-head mse/score against the true fiducial theta.
+            # When use_flow=True the regression head (mean_raw/std_raw) is never trained
+            # (training_step only backprops through flow.log_prob), so its outputs are
+            # meaningless -- use the flow posterior's mean/std instead.
+            y_phys = torch.tensor(
+                theta_all_fom[i, :2], device=device, dtype=torch.float32
+            ).unsqueeze(0)
+            if compressor.hparams.use_flow:
+                mean_phys = (
+                    torch.from_numpy(samples_phys.mean(axis=0))
+                    .to(device, dtype=torch.float32)
+                    .unsqueeze(0)
+                )
+                std_phys = (
+                    torch.from_numpy(samples_phys.std(axis=0))
+                    .to(device, dtype=torch.float32)
+                    .unsqueeze(0)
+                )
+            else:
+                mean_phys = mean_raw * theta_std_t + theta_mean_t
+                std_phys = std_raw * theta_std_t
             sq_error = (y_phys - mean_phys) ** 2
-            score_i = -torch.sum(sq_error / std_phys**2 + torch.log(std_phys**2) + 1000.0 * sq_error, dim=1)
+            score_i = -torch.sum(
+                sq_error / std_phys**2 + torch.log(std_phys**2) + 1000.0 * sq_error,
+                dim=1,
+            )
             mse_i = F.mse_loss(mean_phys, y_phys)
             score_values.append(score_i.item())
             mse_values.append(mse_i.item())
+
+            # NF-based mse/score: same formula, but mean/std always taken from the
+            # flow posterior samples (ensemble or best, per cfg.inference_mode),
+            # regardless of compressor.hparams.use_flow.
+            mean_phys_nf = (
+                torch.from_numpy(samples_phys.mean(axis=0))
+                .to(device, dtype=torch.float32)
+                .unsqueeze(0)
+            )
+            std_phys_nf = (
+                torch.from_numpy(samples_phys.std(axis=0))
+                .to(device, dtype=torch.float32)
+                .unsqueeze(0)
+            )
+            sq_error_nf = (y_phys - mean_phys_nf) ** 2
+            score_nf_i = -torch.sum(
+                sq_error_nf / std_phys_nf**2
+                + torch.log(std_phys_nf**2)
+                + 1000.0 * sq_error_nf,
+                dim=1,
+            )
+            mse_nf_i = F.mse_loss(mean_phys_nf, y_phys)
+            score_nf_values.append(score_nf_i.item())
+            mse_nf_values.append(mse_nf_i.item())
 
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
@@ -443,15 +657,34 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     print(f"  MSE = {mse_mean:.6f} ± {mse_std:.6f}")
     print(f"  Score = {score_mean:.2f} ± {score_std:.2f}")
 
+    mse_nf_mean = np.mean(mse_nf_values)
+    mse_nf_std = np.std(mse_nf_values)
+    score_nf_mean = np.mean(score_nf_values)
+    score_nf_std = np.std(score_nf_values)
+    print(f"  MSE (NF, {cfg.inference_mode}) = {mse_nf_mean:.6f} ± {mse_nf_std:.6f}")
+    print(
+        f"  Score (NF, {cfg.inference_mode}) = {score_nf_mean:.2f} ± {score_nf_std:.2f}"
+    )
+
     # ── 7. Save results ──
-    torch.save(best_state, results_dir / "npe_flow.pt")
+    torch.save(seed_states, results_dir / "npe_flow_ensemble.pt")
 
     # Save posterior samples: shape (n_fiducial_maps, n_posterior_samples, 2)
     # columns: [Omega_m, S_8] in physical units
     posterior_samples_arr = np.stack(all_posterior_samples, axis=0)
     np.save(results_dir / "posterior_samples.npy", posterior_samples_arr)
-    print(f"Posterior samples saved to {results_dir / 'posterior_samples.npy'} "
-          f"(shape {posterior_samples_arr.shape})")
+    print(
+        f"Posterior samples saved to {results_dir / 'posterior_samples.npy'} "
+        f"(shape {posterior_samples_arr.shape})"
+    )
+
+    # Save per-seed posterior samples for the diagnostic plot:
+    # shape (n_plot, npe_seeds, n_posterior_samples, 2)
+    per_seed_samples_arr = np.stack(
+        [np.stack(obs_samples, axis=0) for obs_samples in per_seed_posterior_samples],
+        axis=0,
+    )
+    np.save(results_dir / "per_seed_posterior_samples.npy", per_seed_samples_arr)
 
     results = {
         "budget": budget,
@@ -464,86 +697,153 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         "score_mean": float(score_mean),
         "score_std": float(score_std),
         "score_values": [float(v) for v in score_values],
+        "mse_nf_mean": float(mse_nf_mean),
+        "mse_nf_std": float(mse_nf_std),
+        "mse_nf_values": [float(v) for v in mse_nf_values],
+        "score_nf_mean": float(score_nf_mean),
+        "score_nf_std": float(score_nf_std),
+        "score_nf_values": [float(v) for v in score_nf_values],
         "best_val_nll": float(best_val_nll),
         "n_noise_realizations": cfg.n_noise_realizations,
         "n_fiducial_maps": len(kappa_all_fom),
         "n_posterior_samples": cfg.n_posterior_samples,
         "compressor_checkpoint": ckpt_path,
+        "inference_mode": cfg.inference_mode,
+        "best_seed_idx": best_seed_idx,
+        "mixture_weights": [float(w) for w in mixture_weights],
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
-    # ── 8. GetDist posterior plot ──
+    # ── 8. GetDist posterior plot: one panel per fiducial observation, each panel
+    # overlaying the per-seed NF posteriors (not the pooled ensemble draw) so that
+    # seed-to-seed disagreement is visible. Axes are fixed to the requested
+    # Omega_m/S_8 ranges instead of showing the (much wider) prior box.
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from getdist import MCSamples, plots as gdplots
+    from getdist import MCSamples
+    from getdist import plots as gdplots
 
-    # Prior bounds from the challenge dataset
-    PRIOR_BOUNDS = {
-        "Omega_m": (0.0913, 0.6190),
-        "S_8":     (0.6801, 0.9552),
-    }
+    OMEGA_M_LIM = (0.1, 0.6)
+    S8_LIM = (0.7, 0.95)
     fiducial_omega_m = THETA_MEAN[0]
     fiducial_s8 = THETA_MEAN[1]
 
-    # Build a flat prior MCSamples so getdist renders it as a box
-    n_prior = 50_000
-    prior_samples = np.column_stack([
-        np.random.uniform(*PRIOR_BOUNDS["Omega_m"], size=n_prior),
-        np.random.uniform(*PRIOR_BOUNDS["S_8"],     size=n_prior),
-    ])
-    mc_prior = MCSamples(
-        samples=prior_samples,
-        names=["Omega_m", "S_8"],
-        labels=[r"\Omega_m", r"S_8"],
-        label="Prior",
-    )
-
-    n_plot = min(5, len(all_posterior_samples))
-    mc_list = [mc_prior]
+    g = gdplots.get_subplot_plotter(subplot_size=3.5)
+    # Default getdist line_styles only has 12 entries; with npe_seeds > 12 (one
+    # line per seed per panel) plot_2d raises IndexError, so extend the palette.
+    n_seeds_plot = len(ensemble_flows)
+    if n_seeds_plot > len(g.settings.line_styles):
+        cmap = matplotlib.colormaps["tab20"]
+        g.settings.line_styles = [("-", cmap(j % 20)) for j in range(n_seeds_plot)]
+    g.make_figure(n_plot, nx=n_plot)
     for i in range(n_plot):
-        mc = MCSamples(
-            samples=all_posterior_samples[i],
-            names=["Omega_m", "S_8"],
-            labels=[r"\Omega_m", r"S_8"],
-            label=f"obs {i+1}",
+        mc_list = [
+            MCSamples(
+                samples=per_seed_posterior_samples[i][seed_idx],
+                names=["Omega_m", "S_8"],
+                labels=[r"\Omega_m", r"S_8"],
+                label=f"seed {seed_idx+1}",
+            )
+            for seed_idx in range(len(ensemble_flows))
+        ]
+        ax = g._subplot_number(i)
+        g.plot_2d(
+            mc_list, "Omega_m", "S_8", filled=False, ax=ax, add_legend_proxy=(i == 0)
         )
-        mc_list.append(mc)
-
-    g = gdplots.get_subplot_plotter()
-    g.triangle_plot(mc_list, filled=False, legend_loc="upper right")
-    # Mark fiducial cosmology on all subplots
-    for ax in g.subplots.flat:
-        if ax is not None:
-            ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
-            ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_xlim(*OMEGA_M_LIM)
+        ax.set_ylim(*S8_LIM)
+        ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_title(f"obs {i+1}", fontsize=9)
+    g.add_legend(
+        [f"seed {seed_idx+1}" for seed_idx in range(len(ensemble_flows))],
+        legend_loc="lower left",
+        ax=g._subplot_number(0),
+        fontsize=8,
+        legend_ncol=2 if n_seeds_plot > 6 else 1,
+    )
 
     plot_path = results_dir / "posterior_plot.png"
     g.export(str(plot_path))
     print(f"Posterior plot saved to {plot_path}")
 
-    wandb.log({
-        "fom_mean": fom_mean,
-        "fom_std": fom_std,
-        "mse_mean": mse_mean,
-        "mse_std": mse_std,
-        "score_mean": score_mean,
-        "score_std": score_std,
-        "best_val_nll": best_val_nll,
-        "best_seed/posterior_plot": wandb.Image(str(plot_path)),
-    })
+    # ── 8b. GetDist posterior plot: one panel per fiducial observation, each
+    # showing the single final mixture posterior (all_posterior_samples), i.e.
+    # what FoM/calibration actually use -- as opposed to the per-seed breakdown
+    # in the plot above.
+    g_ens = gdplots.get_subplot_plotter(subplot_size=3.5)
+    g_ens.make_figure(n_plot, nx=n_plot)
+    for i in range(n_plot):
+        mc_ens = MCSamples(
+            samples=all_posterior_samples[i],
+            names=["Omega_m", "S_8"],
+            labels=[r"\Omega_m", r"S_8"],
+            label="ensemble posterior",
+        )
+        ax = g_ens._subplot_number(i)
+        g_ens.plot_2d(
+            [mc_ens],
+            "Omega_m",
+            "S_8",
+            filled=True,
+            ax=ax,
+            add_legend_proxy=(i == 0),
+        )
+        ax.set_xlim(*OMEGA_M_LIM)
+        ax.set_ylim(*S8_LIM)
+        ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_title(f"obs {i+1}", fontsize=9)
+
+    ensemble_plot_path = results_dir / "ensemble_posterior_plot.png"
+    g_ens.export(str(ensemble_plot_path))
+    print(f"Ensemble posterior plot saved to {ensemble_plot_path}")
+
+    # Mixture weights as a single bar-chart panel (one bar per seed) instead of
+    # npe_seeds separate scalar metrics.
+    weights_table = wandb.Table(
+        data=[[f"seed{k+1}", float(w)] for k, w in enumerate(mixture_weights)],
+        columns=["seed", "weight"],
+    )
+
+    wandb.log(
+        {
+            "fom_mean": fom_mean,
+            "fom_std": fom_std,
+            "mse_mean": mse_mean,
+            "mse_std": mse_std,
+            "score_mean": score_mean,
+            "score_std": score_std,
+            "mse_nf_mean": mse_nf_mean,
+            "mse_nf_std": mse_nf_std,
+            "score_nf_mean": score_nf_mean,
+            "score_nf_std": score_nf_std,
+            "best_val_nll": best_val_nll,
+            "per_seed_posterior_plot": wandb.Image(str(plot_path)),
+            "ensemble_posterior_plot": wandb.Image(str(ensemble_plot_path)),
+            "mixture_weights_plot": wandb.plot.bar(
+                weights_table, "seed", "weight", title="Mixture weights"
+            ),
+        }
+    )
 
     # ── 9. TARP + MIRA calibration tests ──
-    # 9a: on the NPE's own held-out validation data (same distribution as training — sanity check)
+    # 9a: on the NPE's own held-out validation data (same distribution as training —
+    # sanity check)
     # 9b: on the flat dataset validation split (held-out maps, needs noise+mask)
     calibration_results = {}
     try:
-        from tarp import get_tarp_coverage
-        from mira_score import mira as mira_score
         import torch as _torch
+        from mira_score import mira as mira_score
+        from tarp import get_tarp_coverage
 
         def _run_calibration(summaries_t, theta_norm, tag, n_cap=None):
-            """Sample posteriors then run TARP + MIRA. Returns (ecp, alpha, mira_mean, mira_std)."""
+            """Sample posteriors then run TARP + MIRA.
+
+            Returns (ecp, alpha, mira_mean, mira_std).
+            """
             n = len(summaries_t) if n_cap is None else min(n_cap, len(summaries_t))
             summaries_t = _normalize_context(summaries_t[:n])
             theta_norm = theta_norm[:n]
@@ -551,8 +851,10 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             posterior = []
             with _torch.no_grad():
                 for i in range(n):
-                    s_i = summaries_t[i:i+1].to(device)
-                    samps = flow.sample(cfg.n_val_posterior_samples, context=s_i)  # (1, S, 2)
+                    s_i = summaries_t[i : i + 1].to(device)
+                    samps = _sample_posterior(
+                        cfg.n_val_posterior_samples, s_i
+                    )  # (1, S, 2)
                     posterior.append(samps.squeeze(0).cpu().numpy())
             posterior_arr = np.stack(posterior, axis=0)  # (n, S, 2)
 
@@ -563,9 +865,13 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 metric="euclidean",
                 norm=True,
             )
-            posterior_torch = _torch.from_numpy(posterior_arr).unsqueeze(0)  # (1, n, S, 2)
+            posterior_torch = _torch.from_numpy(posterior_arr).unsqueeze(
+                0
+            )  # (1, n, S, 2)
             truth_torch = _torch.from_numpy(theta_norm.astype(np.float32))
-            m_mean, m_std = mira_score(truth_torch, posterior_torch, num_runs=100, device=device)
+            m_mean, m_std = mira_score(
+                truth_torch, posterior_torch, num_runs=500, norm=True, device=device
+            )
 
             # TARP plot
             fig, ax = plt.subplots(figsize=(5, 5))
@@ -580,15 +886,21 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             fig.savefig(str(tarp_path), dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-            print(f"  [{tag}] TARP max|ecp-α| = {np.max(np.abs(ecp - alpha)):.4f}  "
-                  f"MIRA = {float(m_mean[0]):.4f} ± {float(m_std[0]):.4f}")
-            wandb.log({
-                f"calibration/{tag}/tarp_plot": wandb.Image(str(tarp_path)),
-                f"calibration/{tag}/mira_score": float(m_mean[0]),
-                f"calibration/{tag}/mira_std": float(m_std[0]),
-                f"calibration/{tag}/tarp_max_deviation": float(np.max(np.abs(ecp - alpha))),
-                f"calibration/{tag}/n_maps": n,
-            })
+            print(
+                f"  [{tag}] TARP max|ecp-α| = {np.max(np.abs(ecp - alpha)):.4f}  "
+                f"MIRA = {float(m_mean[0]):.4f} ± {float(m_std[0]):.4f}"
+            )
+            wandb.log(
+                {
+                    f"calibration/{tag}/tarp_plot": wandb.Image(str(tarp_path)),
+                    f"calibration/{tag}/mira_score": float(m_mean[0]),
+                    f"calibration/{tag}/mira_std": float(m_std[0]),
+                    f"calibration/{tag}/tarp_max_deviation": float(
+                        np.max(np.abs(ecp - alpha))
+                    ),
+                    f"calibration/{tag}/n_maps": n,
+                }
+            )
             np.save(results_dir / f"tarp_ecp_{tag}.npy", ecp)
             np.save(results_dir / f"tarp_alpha_{tag}.npy", alpha)
             np.save(results_dir / f"val_posterior_samples_{tag}.npy", posterior_arr)
@@ -612,6 +924,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         if load_flat_val is not None:
             print("\nCalibration 9b: flat dataset validation split...")
             from cosmoford import NOISE_STD as _NOISE_STD
+
             _mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
             rng_val = np.random.default_rng(99)
 
@@ -619,14 +932,22 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             n_flat = min(cfg.n_val_maps, len(flat_val))
             kappa_flat = np.array(flat_val[:n_flat]["kappa"])
             theta_flat = np.array(flat_val[:n_flat]["theta"])
-            theta_flat_norm = ((theta_flat[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]).astype(np.float32)
+            theta_flat_norm = (
+                (theta_flat[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]
+            ).astype(np.float32)
 
             flat_summaries = []
             with _torch.no_grad():
                 for kappa_i in kappa_flat:
                     kappa_rs = reshape_field_numpy(kappa_i[np.newaxis])[0]
-                    kappa_noisy = (kappa_rs + rng_val.standard_normal(kappa_rs.shape) * _NOISE_STD) * _mask
-                    x = _torch.from_numpy(kappa_noisy.astype(np.float32)).unsqueeze(0).to(device)
+                    kappa_noisy = (
+                        kappa_rs + rng_val.standard_normal(kappa_rs.shape) * _NOISE_STD
+                    ) * _mask
+                    x = (
+                        _torch.from_numpy(kappa_noisy.astype(np.float32))
+                        .unsqueeze(0)
+                        .to(device)
+                    )
                     flat_summaries.append(compressor.compress(x).cpu())
             flat_summaries_t = _torch.cat(flat_summaries, dim=0)
 
@@ -684,7 +1005,10 @@ if __name__ != "__main__":
         .add_local_dir("cosmoford", "/root/cosmoford", copy=True)
         .add_local_dir("configs", "/root/configs", copy=True)
         .add_local_file("pyproject.toml", "/root/pyproject.toml", copy=True)
-        .run_commands("cd /root && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e . --no-deps")
+        .run_commands(
+            "cd /root && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 "
+            "pip install -e . --no-deps"
+        )
     )
 
     app = modal.App("cosmoford-npe-budget-scan", image=image)
@@ -706,16 +1030,21 @@ if __name__ != "__main__":
     )
     def train_npe_for_budget(budget: int):
         from datasets import load_dataset as _hf_load
+
         cfg = NPEConfig.from_yaml(MODAL_CONFIG_PATH)
         return _train_budget_core(
             budget,
             CHECKPOINTS_PATH,
             NPE_RESULTS_PATH,
             SUMMARIES_CACHE_PATH,
-            lambda split: _hf_load("CosmoStat/neurips-wl-challenge-holdout", split=split),
+            lambda split: _hf_load(
+                "CosmoStat/neurips-wl-challenge-holdout", split=split
+            ),
             cfg,
             vol=volume,
-            load_flat_val=lambda split: _hf_load("CosmoStat/neurips-wl-challenge-flat", split=split),
+            load_flat_val=lambda split: _hf_load(
+                "CosmoStat/neurips-wl-challenge-flat", split=split
+            ),
         )
 
     @app.function(
@@ -724,6 +1053,7 @@ if __name__ != "__main__":
     )
     def load_all_results() -> list[dict]:
         import json
+
         volume.reload()
         results = []
         if NPE_RESULTS_PATH.exists():
@@ -744,9 +1074,11 @@ if __name__ != "__main__":
         print(f"Waiting for {len(handles)} NPE runs to complete...")
         for h in handles:
             result = h.get()
-            print(f"  budget-{result['budget']}: FoM = {result['fom_mean']:.2f} ± {result['fom_std']:.2f}")
+            print(
+                f"  budget-{result['budget']}: "
+                f"FoM = {result['fom_mean']:.2f} ± {result['fom_std']:.2f}"
+            )
         print("All NPE budget scan runs completed.")
-
 
 
 # ── Local entry point ─────────────────────────────────────────────────────────
@@ -759,31 +1091,73 @@ if __name__ == "__main__":
         description="NPE budget scan — local cluster mode",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--checkpoints_path", required=True,
-                        help="Path to compressor checkpoints root (contains budget-N/ subdirs)")
-    parser.add_argument("--npe_results_path", required=True,
-                        help="Path where NPE results will be written")
-    parser.add_argument("--summaries_cache_path", required=True,
-                        help="Path for caching pre-computed summaries")
-    parser.add_argument("--holdout_path", required=True,
-                        help="Path to holdout DatasetDict (save_to_disk format, 'train' and 'fiducial' splits)")
-    parser.add_argument("--flat_dataset_path", default=None,
-                        help="Path to neurips-wl-challenge-flat DatasetDict (save_to_disk format). "
-                             "If provided, TARP and MIRA calibration tests are run on the 'validation' split.")
-    parser.add_argument("--config", required=True,
-                        help="Path to YAML config file (configs/experiments/npe_budget_scan.yaml)")
-    parser.add_argument("--budgets",
-                        help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
-                             "(overrides the budgets list in the config file)")
-    parser.add_argument("--offline", help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
-                             "is not found locally", type = bool)
-    parser.add_argument("--context_normalization", help="Enable context normalization", default=False,
-                        type = bool)
+    parser.add_argument(
+        "--checkpoints_path",
+        required=True,
+        help="Path to compressor checkpoints root (contains budget-N/ subdirs)",
+    )
+    parser.add_argument(
+        "--npe_results_path",
+        required=True,
+        help="Path where NPE results will be written",
+    )
+    parser.add_argument(
+        "--summaries_cache_path",
+        required=True,
+        help="Path for caching pre-computed summaries",
+    )
+    parser.add_argument(
+        "--holdout_path",
+        required=True,
+        help=(
+            "Path to holdout DatasetDict (save_to_disk format, "
+            "'train' and 'fiducial' splits)"
+        ),
+    )
+    parser.add_argument(
+        "--flat_dataset_path",
+        default=None,
+        help="Path to neurips-wl-challenge-flat DatasetDict (save_to_disk format). "
+        "If provided, TARP and MIRA calibration tests are run on the 'validation' "
+        "split.",
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to YAML config file (configs/experiments/npe_budget_scan.yaml)",
+    )
+    parser.add_argument(
+        "--budgets",
+        help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
+        "(overrides the budgets list in the config file)",
+    )
+    parser.add_argument(
+        "--offline",
+        help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
+        "is not found locally",
+        type=bool,
+    )
+    parser.add_argument(
+        "--context_normalization",
+        help="Enable context normalization",
+        default=False,
+        type=bool,
+    )
+    parser.add_argument(
+        "--inference_mode",
+        choices=["ensemble", "best"],
+        default=None,
+        help="'ensemble' samples from a uniform mixture over all npe_seeds flows; "
+        "'best' samples only from the single lowest-val_nll flow "
+        "(overrides the config file value)",
+    )
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
     if args.budgets is not None:
         cfg.budgets = [int(b) for b in args.budgets.split(",")]
+    if args.inference_mode is not None:
+        cfg.inference_mode = args.inference_mode
 
     holdout_ds = load_from_disk(args.holdout_path)
     flat_ds = load_from_disk(args.flat_dataset_path) if args.flat_dataset_path else None
@@ -797,6 +1171,8 @@ if __name__ == "__main__":
             lambda split, ds=holdout_ds: ds[split],
             cfg,
             offline=args.offline,
-            load_flat_val=(lambda split, ds=flat_ds: ds[split]) if flat_ds is not None else None,
-            context_normalization=args.context_normalization
+            load_flat_val=(
+                (lambda split, ds=flat_ds: ds[split]) if flat_ds is not None else None
+            ),
+            context_normalization=args.context_normalization,
         )

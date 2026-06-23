@@ -12,11 +12,20 @@ npe_epochs: 100
 npe_lr: 1.0e-4
 npe_batch_size: 128
 npe_patience: 50
-npe_seeds: 5
+npe_seeds: 10
 
 # FoM evaluation
 n_posterior_samples: 10000
 
 # Calibration validation (TARP + MIRA) — requires `pip install tarp mira_score`
-n_val_maps: 500
-n_val_posterior_samples: 1000
+n_val_maps: 5000
+n_val_posterior_samples: 10000
+
+# flow architecture
+n_transforms: 5
+context_dim: 8
+hidden_dim: 64
+
+# "ensemble" samples from a uniform mixture over all npe_seeds flows (better
+# calibration); "best" samples only from the single lowest-val_nll flow (sharper FoM)
+inference_mode: ensemble 
