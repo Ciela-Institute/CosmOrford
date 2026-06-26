@@ -92,10 +92,10 @@ def find_best_checkpoint(
             if Path(ckpt).name == "last.ckpt":
                 continue
             match = re.search(r"val_(?:log_prob|nll)=([-+]?\d*\.?\d+)", ckpt)
-            step_match = re.search(r"step=(\d+)", ckpt)
-            if match and step_match:
+            step_match = re.search(r"(?:step|epoch)=(\d+)", ckpt)
+            if match:
                 candidates.append(
-                    (float(match.group(1)), int(step_match.group(1)), str(ckpt))
+                    (float(match.group(1)), int(step_match.group(1)) if step_match else 0, str(ckpt))
                 )
 
         if candidates:
@@ -109,9 +109,9 @@ def find_best_checkpoint(
             )
             return best_path
 
-        # Strategy 2: Fall back to last.ckpt
+        # Strategy 2: Fall back to last.ckpt (skip if empty/corrupted)
         last_ckpt = checkpoint_dir / "last.ckpt"
-        if last_ckpt.exists():
+        if last_ckpt.exists() and last_ckpt.stat().st_size > 0:
             print(f"Using last.ckpt for budget-{budget}")
             return str(last_ckpt)
 
