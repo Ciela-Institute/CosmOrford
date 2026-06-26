@@ -62,6 +62,13 @@ dev = [
     "ipykernel",
     "jupyter",
 ]
+# Required for the "hos" / "scattering" emulator checkpoint-selection metrics
+# (cosmoford/summaries.py: compute_higher_order_statistics_batch,
+# compute_scattering_batch -- ported from Andreas Tersenov's origin/hos branch).
+hos = [
+    "wl_stats_torch",
+    "kymatio",
+]
 
 [project.urls]
 Homepage = "https://github.com/cosmostat/neurips-wl-challenge"

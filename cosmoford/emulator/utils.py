@@ -1,29 +1,37 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from scipy.stats import chi2 as chi2_dist
 from pqm import pqm_chi2
-from cosmoford import SURVEY_MASK
+from scipy.stats import chi2 as chi2_dist
+
+from cosmoford import NOISE_STD, SURVEY_MASK
 from cosmoford.dataset import reshape_field_numpy
+from cosmoford.summaries import (
+    compute_scattering_batch,
+    compute_wavelet_l1_norms_batch,
+    compute_wavelet_peaks_batch,
+    power_spectrum_batch,
+)
 
 
 def iter_microbatches(batch: dict[str, torch.Tensor], micro_bs: int):
     """Yield smaller batch dicts by slicing along the batch dimension.
     If micro_bs <= 0 or micro_bs >= B, yield the original batch once.
     """
-    B = batch['x0'].shape[0]
+    B = batch["x0"].shape[0]
     if micro_bs <= 0 or micro_bs >= B:
         yield batch
         return
     for start in range(0, B, micro_bs):
         end = min(B, start + micro_bs)
         yield {
-            'x0': batch['x0'][start:end],
-            'x1': batch['x1'][start:end],
-            't': batch['t'][start:end],
-            'theta_x0': batch['theta_x0'][start:end],
-            'theta_x1': batch['theta_x1'][start:end],
+            "x0": batch["x0"][start:end],
+            "x1": batch["x1"][start:end],
+            "t": batch["t"][start:end],
+            "theta_x0": batch["theta_x0"][start:end],
+            "theta_x1": batch["theta_x1"][start:end],
         }
+
 
 def preprocess_batch(batch, rng: np.random.Generator):
     """Prepare NumPy batches with minimal conversions before UNet.
@@ -34,27 +42,29 @@ def preprocess_batch(batch, rng: np.random.Generator):
     """
     batch_lognormal, batch_nbody = batch
     idx = rng.integers(low=0, high=10)
-    shape_dataset = batch_lognormal['kappa'].shape
+    shape_dataset = batch_lognormal["kappa"].shape
     # Lognormal maps: (B, 10, H, W) -> pick idx -> (B, H, W) -> reshape (B, 1834, 88)
-    kappa_logn = batch_lognormal['kappa']
-    y_logn = batch_lognormal['theta']
+    kappa_logn = batch_lognormal["kappa"]
+    y_logn = batch_lognormal["theta"]
     if len(shape_dataset) == 4:
         kappa_logn = kappa_logn[:, idx, :, :]
         y_logn = y_logn[:, 1:]
     x_logn = reshape_field_numpy(kappa_logn)
 
     # N-body maps: (B, H, W) -> reshape (B, 1834, 88)
-    kappa_nbody = batch_nbody['kappa']
+    kappa_nbody = batch_nbody["kappa"]
     x_nbody = reshape_field_numpy(kappa_nbody)
-    y_nbody = batch_nbody['theta'][:, [0, 1, -1]]
+    y_nbody = batch_nbody["theta"][:, [0, 1, -1]]
 
-    return {'maps': x_logn, 'theta': y_logn}, {'maps': x_nbody, 'theta': y_nbody}
+    return {"maps": x_logn, "theta": y_logn}, {"maps": x_nbody, "theta": y_nbody}
+
 
 def split_rng(rng: np.random.Generator, n: int) -> list[np.random.Generator]:
     """Create n independent child RNGs from a parent Generator by sampling new seeds.
     Deterministic given the parent's state.
     """
     return [np.random.default_rng(int(rng.integers(0, 2**63))) for _ in range(n)]
+
 
 def augmentation_data_numpy(
     maps: np.ndarray,
@@ -89,13 +99,16 @@ def augmentation_data_numpy(
         maps = maps[..., 0]
     return maps, vmask, hmask
 
+
 def apply_mask(x, vmask=None, hmask=None):
     """Apply survey mask to x, aligning flips per-sample using vmask/hmask.
 
     x is expected to be NumPy with shape (B,H,W) or (B,H,W,1).
     vmask/hmask are boolean arrays of length B indicating flips applied to the maps.
     """
-    base_mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])  # (H,W)
+    base_mask = np.concatenate(
+        [SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]]
+    )  # (H,W)
     # Add batch dim and repeat to match x's batch size
     B = x.shape[0]
     mask = base_mask[None, ...]  # (1,H,W)
@@ -113,7 +126,9 @@ def apply_mask(x, vmask=None, hmask=None):
     return x * mask
 
 
-def sample_one_per_cosmology(dataset, rng: np.random.Generator, theta_decimals: int = 5):
+def sample_one_per_cosmology(
+    dataset, rng: np.random.Generator, theta_decimals: int = 5
+):
     """Sample exactly one random realization per unique cosmology.
 
     The NeurIPS WL Challenge N-body dataset has 101 cosmologies × 256 realizations.
@@ -137,16 +152,16 @@ def sample_one_per_cosmology(dataset, rng: np.random.Generator, theta_decimals: 
     maps : np.ndarray, shape (N_cosmo, H_red, W_red)
     theta : np.ndarray, shape (N_cosmo, n_params)
     """
-    all_theta = np.array(dataset['theta'])                          # (N, n_params) — lightweight
+    all_theta = np.array(dataset["theta"])  # (N, n_params) — lightweight
     theta_rounded = np.round(all_theta, decimals=theta_decimals)
     _, inverse = np.unique(theta_rounded, axis=0, return_inverse=True)
     n_cosmo = int(inverse.max()) + 1
 
     chosen = [int(rng.choice(np.where(inverse == c)[0])) for c in range(n_cosmo)]
     batch = dataset.select(chosen)[:]
-    kappa = np.array(batch['kappa'])          # (N_cosmo, H, W)
-    maps = reshape_field_numpy(kappa)         # (N_cosmo, H_red, W_red)
-    theta_out = np.array(batch['theta'])
+    kappa = np.array(batch["kappa"])  # (N_cosmo, H, W)
+    maps = reshape_field_numpy(kappa)  # (N_cosmo, H_red, W_red)
+    theta_out = np.array(batch["theta"])
     return maps, theta_out
 
 
@@ -175,25 +190,125 @@ def pqm_evaluate(maps_ref, maps_gen, num_refs=200, re_tessellation=200):
         ref_flat = maps_ref.reshape(len(maps_ref), -1).astype(np.float32)
     else:
         ref_flat = maps_ref.reshape(len(maps_ref), -1).to(torch.float32).cpu().numpy()
-    
+
     if isinstance(maps_gen, np.ndarray):
         gen_flat = maps_gen.reshape(len(maps_gen), -1).astype(np.float32)
     else:
         gen_flat = maps_gen.reshape(len(maps_gen), -1).to(torch.float32).cpu().numpy()
 
-    chi2_vals = pqm_chi2(ref_flat, gen_flat, num_refs=num_refs, re_tessellation=re_tessellation, x_frac=1.0)
+    chi2_vals = pqm_chi2(
+        ref_flat,
+        gen_flat,
+        num_refs=num_refs,
+        re_tessellation=re_tessellation,
+        x_frac=1.0,
+    )
 
     dof = num_refs - 1
     x = np.linspace(max(0, dof - 4 * np.sqrt(2 * dof)), dof + 6 * np.sqrt(2 * dof), 300)
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.hist(chi2_vals, bins=35, density=True, alpha=0.7, color="steelblue", label="PQMass χ²")
+    ax.hist(
+        chi2_vals,
+        bins=35,
+        density=True,
+        alpha=0.7,
+        color="steelblue",
+        label="PQMass χ²",
+    )
     ax.plot(x, chi2_dist.pdf(x, df=dof), "r-", lw=2, label=f"χ²(dof={dof})")
-    ax.axvline(np.mean(chi2_vals), color="steelblue", linestyle="--", lw=1.5,
-               label=f"mean = {np.mean(chi2_vals):.1f}")
+    ax.axvline(
+        np.mean(chi2_vals),
+        color="steelblue",
+        linestyle="--",
+        lw=1.5,
+        label=f"mean = {np.mean(chi2_vals):.1f}",
+    )
     ax.set_xlabel("χ² statistic")
     ax.set_ylabel("Density")
     ax.legend(fontsize=10)
     ax.set_title("PQMass — χ² distribution")
 
     return chi2_vals, fig
+
+
+def power_spectrum_distance(
+    maps_ref,
+    maps_gen,
+    pixsize=2.0 / 60 / 180 * np.pi,
+    kedge=np.logspace(2, 4, 11),
+):
+    """Mean squared relative deviation between the average power spectra of
+    two map sets: mean_k [(P_gen(k) - P_ref(k)) / P_ref(k)]^2.
+
+    Parameters
+    ----------
+    maps_ref, maps_gen : np.ndarray or torch.Tensor, shape (N, H, W)
+    pixsize, kedge : passed through to power_spectrum_batch.
+
+    Returns
+    -------
+    float — lower is better (0 = identical average power spectra).
+    """
+    ref_t = torch.as_tensor(np.asarray(maps_ref), dtype=torch.float32)
+    gen_t = torch.as_tensor(np.asarray(maps_gen), dtype=torch.float32)
+    _, ps_ref = power_spectrum_batch(
+        ref_t, pixsize=pixsize, kedge=kedge, normalize=False
+    )
+    _, ps_gen = power_spectrum_batch(
+        gen_t, pixsize=pixsize, kedge=kedge, normalize=False
+    )
+    p_ref = ps_ref.mean(dim=0)
+    p_gen = ps_gen.mean(dim=0)
+    rel = (p_gen - p_ref) / p_ref.clamp_min(1e-30)
+    return float((rel**2).mean())
+
+
+def _log1p_mse(feat_ref: torch.Tensor, feat_gen: torch.Tensor) -> float:
+    """mean_f (log1p(mean_gen_f) - log1p(mean_ref_f))^2."""
+    mean_ref = torch.log1p(feat_ref.mean(dim=0))
+    mean_gen = torch.log1p(feat_gen.mean(dim=0))
+    return float(((mean_gen - mean_ref) ** 2).mean())
+
+
+def hos_peaks_distance(maps_ref, maps_gen, noise_std=NOISE_STD, **kwargs):
+    """MSE between log1p mean peak-count histograms (Andreas Tersenov).
+
+    Requires `wl_stats_torch`. Lower is better.
+    kwargs forwarded to compute_wavelet_peaks_batch (n_scales, n_bins, ...).
+    """
+    ref_t = torch.as_tensor(np.asarray(maps_ref), dtype=torch.float32)
+    gen_t = torch.as_tensor(np.asarray(maps_gen), dtype=torch.float32)
+    return _log1p_mse(
+        compute_wavelet_peaks_batch(ref_t, noise_std, normalize=False, **kwargs),
+        compute_wavelet_peaks_batch(gen_t, noise_std, normalize=False, **kwargs),
+    )
+
+
+def hos_l1_distance(maps_ref, maps_gen, noise_std=NOISE_STD, **kwargs):
+    """MSE between log1p mean L1-norm histograms (Andreas Tersenov).
+
+    Requires `wl_stats_torch`. Lower is better.
+    kwargs forwarded to compute_wavelet_l1_norms_batch (n_scales, l1_nbins, ...).
+    """
+    ref_t = torch.as_tensor(np.asarray(maps_ref), dtype=torch.float32)
+    gen_t = torch.as_tensor(np.asarray(maps_gen), dtype=torch.float32)
+    return _log1p_mse(
+        compute_wavelet_l1_norms_batch(ref_t, noise_std, normalize=False, **kwargs),
+        compute_wavelet_l1_norms_batch(gen_t, noise_std, normalize=False, **kwargs),
+    )
+
+
+def scattering_distance(maps_ref, maps_gen, **scattering_kwargs):
+    """MSE between mean scattering coefficient vectors (Andreas Tersenov).
+
+    Requires `kymatio`. Lower is better.
+    scattering_kwargs forwarded to compute_scattering_batch (J, L, ...).
+    """
+    ref_t = torch.as_tensor(np.asarray(maps_ref), dtype=torch.float32)
+    gen_t = torch.as_tensor(np.asarray(maps_gen), dtype=torch.float32)
+    feat_ref = compute_scattering_batch(ref_t, normalize=False, **scattering_kwargs)
+    feat_gen = compute_scattering_batch(gen_t, normalize=False, **scattering_kwargs)
+    mean_ref = feat_ref.mean(dim=0)
+    mean_gen = feat_gen.mean(dim=0)
+    return float(((mean_gen - mean_ref) ** 2).mean())
