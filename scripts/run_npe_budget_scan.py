@@ -74,8 +74,7 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
             print(ckpt)
             if ckpt == "last.ckpt":
                 continue
-            # match = re.search(r"val_log_prob=([\d.]+)", ckpt)
-            match = re.search(r"val_log_prob=([-+]?\d*\.?\d+)", ckpt)
+            match = re.search(r"val_(?:log_prob|nll)=([-+]?\d*\.?\d+)", ckpt)
             if match:
                 logp = float(match.group(1))
                 if logp < best_logp:
@@ -86,9 +85,9 @@ def find_best_checkpoint(budget: int, checkpoints_path: Path, offline: bool = Fa
             print(f"Found best checkpoint for budget-{budget}: {best_path} (val_log_prob={best_logp:.6f})")
             return best_path
 
-        # Strategy 2: Fall back to last.ckpt
+        # Strategy 2: Fall back to last.ckpt (skip if empty/corrupted)
         last_ckpt = checkpoint_dir / "last.ckpt"
-        if last_ckpt.exists():
+        if last_ckpt.exists() and last_ckpt.stat().st_size > 0:
             print(f"Using last.ckpt for budget-{budget}")
             return str(last_ckpt)
 

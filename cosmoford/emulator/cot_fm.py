@@ -29,6 +29,12 @@ from cosmoford.emulator.utils import (
     scattering_distance,
 )
 from cosmoford.emulator.neural_ode import solve_ode_forward
+from cosmoford import NOISE_STD
+from cosmoford.summaries import (
+    power_spectrum_batch,
+    compute_wavelet_peaks_batch,
+    compute_wavelet_l1_norms_batch,
+)
 
 plt.style.use("seaborn-v0_8")
 # Improve default figure quality for logged images (crisper text and colorbars)
@@ -422,99 +428,189 @@ try:
 except Exception:
     pass
 
-print("--Map-based evaluation (PQMass / power spectrum)--")
+print("--Map-based evaluation (power spectrum / PDF / HOS)--")
+
+_PIXSIZE_PS  = 2.0 / 60 / 180 * np.pi
+_KEDGE_PS    = np.logspace(2, 4, 16)
+_K_CENTER_PS = np.sqrt(_KEDGE_PS[:-1] * _KEDGE_PS[1:])
+_K_NEAR_EVAL = 50  # lognormal maps to generate per eval step
+
+# Cache N-body flat-validation thetas so we don't re-read them every eval step
+_thetas_nb_all   = None
+_unique_cosmo_nb = None
+
+
+def _get_nb_cosmologies():
+    global _thetas_nb_all, _unique_cosmo_nb
+    if _thetas_nb_all is None:
+        _thetas_nb_all   = np.array(test_dataset_nbody["theta"], dtype=np.float32)
+        _unique_cosmo_nb = np.unique(_thetas_nb_all[:, :2].round(5), axis=0)
+    return _thetas_nb_all, _unique_cosmo_nb
 
 
 def _run_map_eval(model, label, seed, fig_path, key_prefix, extra_log=None):
-    """Generate i.i.d. reference/generated map sets and compute whichever of
-    "pqm_chi2" / "power_spectrum" are requested in ckpt_metric_weights.
+    """Per-cosmology map evaluation.
 
-    maps_ref: one map per cosmology from the sorted N-body dataset
-    (cosmostat/neurips-wl-challenge), with an independently drawn nuisance
-    index per cosmology to ensure full i.i.d.-ness.
-    maps_gen: ODE output on an independent random draw of lognormal maps
-    (no OT pairing) to keep the generated sample i.i.d.
-
-    Returns a dict of computed metric_name -> mean value (only metrics with
-    nonzero weight in ckpt_metric_weights are computed).
+    1. Pick one random N-body cosmology from the flat validation set.
+    2. Load all ~56 N-body maps at that cosmology.
+    3. Find _K_NEAR_EVAL nearest lognormal maps in (Omega_m, S8) space.
+    4. Generate emulated maps by running those through the ODE.
+    5. Compare power spectrum, pixel PDF, and HOS (peaks + L1 norms).
+    6. Return scalar distances for checkpoint selection.
     """
     try:
-        rng_pqm = np.random.default_rng(seed)
+        rng_eval = np.random.default_rng(seed)
 
-        # Reference: one i.i.d. sample per cosmology from the sorted dataset.
-        # Each of the 256 entries has kappa shape (101, H, W); pick an
-        # independent nuisance index per cosmology.
-        n_nuisance = len(pqm_nbody_dataset)  # 256
-        n_cosmo = 101
-        nuisance_ids = rng_pqm.integers(0, n_nuisance, size=n_cosmo)
-        kappa_ref = np.stack(
-            [pqm_nbody_dataset[int(k)]["kappa"][c] for c, k in enumerate(nuisance_ids)]
-        )  # (101, H, W)
-        maps_ref = reshape_field_numpy(kappa_ref)  # (101, H_red, W_red)
+        # ── 1. Pick one N-body cosmology ─────────────────────────────────────
+        thetas_nb_all, unique_cosmo = _get_nb_cosmologies()
+        idx_cosmo = rng_eval.integers(len(unique_cosmo))
+        theta_ref = unique_cosmo[idx_cosmo]   # (2,)  [Omega_m, S8]
 
-        # Generated: random lognormal inputs → ODE (no OT pairing).
-        # Draw 500 maps for better Voronoi cell coverage in PQMass.
-        n_gen = 500
-        ds_pqm_logn = get_iterable_dataset(test_dataset_lognormal, n_gen, seed + 1000)
-        batch_pqm_logn = next(ds_pqm_logn)
-        kappa_logn = np.array(batch_pqm_logn["kappa"])
-        theta_logn = np.array(batch_pqm_logn["theta"])
-        if kappa_logn.ndim == 4:  # (B, 10, H, W) — pick one map per sim
-            idx = rng_pqm.integers(0, kappa_logn.shape[1])
-            kappa_logn = kappa_logn[:, idx, :, :]
-            theta_logn = theta_logn[:, 1:]
-        x0_logn = reshape_field_numpy(kappa_logn)  # (B, H_red, W_red)
-        x0_t = torch.from_numpy(x0_logn[:, None, :, :]).float()
-        theta_t = torch.from_numpy(theta_logn).float()
+        # ── 2. Load all N-body maps at that cosmology (~56) ──────────────────
+        mask_nb = np.all(thetas_nb_all[:, :2].round(5) == theta_ref, axis=1)
+        idx_nb  = np.where(mask_nb)[0].tolist()
+        kappa_nb = np.array(
+            test_dataset_nbody.select(idx_nb)["kappa"], dtype=np.float32
+        )  # (n_nb, H, W)
+        maps_ref = reshape_field_numpy(kappa_nb)  # (n_nb, H_red, W_red)
 
-        pqm_chunks = []
+        # ── 3. Find k nearest lognormal maps in (Omega_m, S8) ───────────────
+        thetas_logn = np.array(test_dataset_lognormal["theta"], dtype=np.float32)
+        thetas_logn_2d = thetas_logn[:, :2]
+        std_logn = thetas_logn_2d.std(axis=0).clip(min=1e-8)
+        dists    = np.sum(((thetas_logn_2d - theta_ref) / std_logn) ** 2, axis=1)
+        idx_near = np.argsort(dists)[:_K_NEAR_EVAL].tolist()
+
+        batch_logn  = test_dataset_lognormal.select(idx_near)
+        kappa_logn  = np.array(batch_logn["kappa"], dtype=np.float32)  # (k, H, W)
+        theta_logn  = thetas_logn[idx_near]                             # (k, 3)
+
+        # ── 4. Generate maps via ODE ─────────────────────────────────────────
+        x0_logn = reshape_field_numpy(kappa_logn)               # (k, H_red, W_red)
+        x0_t    = torch.from_numpy(x0_logn[:, None]).float()    # (k, 1, H_red, W_red)
+        theta_t = torch.from_numpy(theta_logn[:, :2]).float()   # (k, 2)
+
+        gen_chunks = []
         for start in range(0, x0_t.shape[0], micro_bs):
             with torch.no_grad():
-                pred_chunk = solve_ode_forward(
+                pred = solve_ode_forward(
                     x0_t[start : start + micro_bs].to(device),
                     model,
                     theta_t[start : start + micro_bs].to(device),
                     device,
                 )
-            pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
-        maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
+            gen_chunks.append(pred[-1])   # (chunk, H_red, W_red) numpy
+        maps_gen = np.concatenate(gen_chunks, axis=0)  # (k, H_red, W_red)
 
         metrics = {}
-        log = {}
+        log     = {}
+        stem    = fig_path.stem
+        title   = rf"$\Omega_m={theta_ref[0]:.3f},\ S_8={theta_ref[1]:.3f}$ — {label}"
 
-        if ckpt_metric_weights.get("pqm_chi2", 0):
-            chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=100)
-            fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
-            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            metrics["pqm_chi2"] = float(np.mean(chi2_vals))
-            log[f"{key_prefix}/pqm_chi2_mean"] = metrics["pqm_chi2"]
-            log[f"{key_prefix}/pqm_plot"] = wandb.Image(
-                str(fig_path), caption=f"PQMass N-body vs UNet ({label})"
-            )
-            print(f"PQMass [{label}]: mean χ² = {metrics['pqm_chi2']:.1f}")
+        # ── 5a. Power spectrum ───────────────────────────────────────────────
+        _, ps_nb  = power_spectrum_batch(
+            torch.from_numpy(maps_ref), pixsize=_PIXSIZE_PS, kedge=_KEDGE_PS, normalize=False
+        )
+        _, ps_gen = power_spectrum_batch(
+            torch.from_numpy(maps_gen), pixsize=_PIXSIZE_PS, kedge=_KEDGE_PS, normalize=False
+        )
+        ps_nb_np  = ps_nb.cpu().numpy()
+        ps_gen_np = ps_gen.cpu().numpy()
 
+        fig_ps, ax = plt.subplots(figsize=(7, 4))
+        mn_nb, sd_nb   = ps_nb_np.mean(0),  ps_nb_np.std(0)
+        mn_gen, sd_gen = ps_gen_np.mean(0), ps_gen_np.std(0)
+        ax.fill_between(_K_CENTER_PS, mn_nb - sd_nb,  mn_nb + sd_nb,  alpha=0.3, color="C0")
+        ax.plot(_K_CENTER_PS, mn_nb,  color="C0", label=f"N-body ({len(maps_ref)})")
+        ax.fill_between(_K_CENTER_PS, mn_gen - sd_gen, mn_gen + sd_gen, alpha=0.3, color="C1")
+        ax.plot(_K_CENTER_PS, mn_gen, color="C1", label=f"Generated ({len(maps_gen)})")
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel(r"$\ell$"); ax.set_ylabel(r"$P(\ell)$")
+        ax.set_title(title); ax.legend()
+        fig_ps.tight_layout()
+        ps_path = fig_path.parent / f"ps_{stem}.png"
+        fig_ps.savefig(ps_path, dpi=150); plt.close(fig_ps)
+        log[f"{key_prefix}/ps_plot"] = wandb.Image(str(ps_path), caption=f"PS {label}")
+
+        # ── 5b. Pixel PDF ────────────────────────────────────────────────────
+        bins = np.linspace(-0.15, 0.4, 150)
+        bw   = bins[1] - bins[0]
+        px_nb  = maps_ref.ravel()
+        px_gen = maps_gen.ravel()
+        h_nb,  _ = np.histogram(px_nb,  bins=bins)
+        h_gen, _ = np.histogram(px_gen, bins=bins)
+        pdf_nb  = h_nb  / (len(px_nb)  * bw)
+        pdf_gen = h_gen / (len(px_gen) * bw)
+
+        fig_pdf, axes_pdf = plt.subplots(1, 2, figsize=(12, 4))
+        for ax, yscale in zip(axes_pdf, ["linear", "log"]):
+            ax.stairs(pdf_nb,  bins, fill=True, alpha=0.4, color="C0",
+                      label=f"N-body ({len(maps_ref)})")
+            ax.stairs(pdf_gen, bins, fill=True, alpha=0.4, color="C1",
+                      label=f"Generated ({len(maps_gen)})")
+            ax.set_xlabel(r"$\kappa$"); ax.set_ylabel("Density")
+            ax.set_yscale(yscale); ax.set_title(f"Pixel PDF ({yscale})"); ax.legend()
+        fig_pdf.suptitle(title)
+        fig_pdf.tight_layout()
+        pdf_path = fig_path.parent / f"pdf_{stem}.png"
+        fig_pdf.savefig(pdf_path, dpi=150); plt.close(fig_pdf)
+        log[f"{key_prefix}/pdf_plot"] = wandb.Image(str(pdf_path), caption=f"PDF {label}")
+
+        # ── 5c. HOS (wavelet peaks + L1 norms) ──────────────────────────────
+        peaks_nb  = compute_wavelet_peaks_batch(
+            torch.from_numpy(maps_ref), noise_std=NOISE_STD, normalize=False
+        ).cpu().numpy()
+        peaks_gen = compute_wavelet_peaks_batch(
+            torch.from_numpy(maps_gen), noise_std=NOISE_STD, normalize=False
+        ).cpu().numpy()
+        l1_nb  = compute_wavelet_l1_norms_batch(
+            torch.from_numpy(maps_ref), noise_std=NOISE_STD, normalize=False
+        ).cpu().numpy()
+        l1_gen = compute_wavelet_l1_norms_batch(
+            torch.from_numpy(maps_gen), noise_std=NOISE_STD, normalize=False
+        ).cpu().numpy()
+
+        fig_hos, axes_hos = plt.subplots(1, 2, figsize=(12, 4))
+        for ax, nb, gen, ttl in zip(
+            axes_hos,
+            [peaks_nb, l1_nb], [peaks_gen, l1_gen],
+            ["Wavelet peak counts", "Wavelet L1 norms"],
+        ):
+            x = np.arange(nb.shape[1])
+            mn, sd = nb.mean(0), nb.std(0)
+            mg, sg = gen.mean(0), gen.std(0)
+            ax.plot(x, mn, color="C0", label=f"N-body ({len(nb)})")
+            ax.fill_between(x, mn - sd, mn + sd, alpha=0.3, color="C0")
+            ax.plot(x, mg, color="C1", label=f"Generated ({len(gen)})")
+            ax.fill_between(x, mg - sg, mg + sg, alpha=0.3, color="C1")
+            ax.set_xlabel("Coefficient index"); ax.set_ylabel("Mean value")
+            ax.set_title(ttl); ax.legend()
+        fig_hos.suptitle(title)
+        fig_hos.tight_layout()
+        hos_path = fig_path.parent / f"hos_{stem}.png"
+        fig_hos.savefig(hos_path, dpi=150); plt.close(fig_hos)
+        log[f"{key_prefix}/hos_plot"] = wandb.Image(str(hos_path), caption=f"HOS {label}")
+
+        # ── 6. Scalar distances for checkpoint selection ─────────────────────
         if ckpt_metric_weights.get("power_spectrum", 0):
             metrics["power_spectrum"] = power_spectrum_distance(maps_ref, maps_gen)
             log[f"{key_prefix}/power_spectrum_dist"] = metrics["power_spectrum"]
-            print(
-                f"Power spectrum [{label}]: mean rel. dist² = {metrics['power_spectrum']:.4g}"
-            )
+            print(f"Power spectrum [{label}]: {metrics['power_spectrum']:.4g}")
 
         if ckpt_metric_weights.get("hos_peaks", 0):
             metrics["hos_peaks"] = hos_peaks_distance(maps_ref, maps_gen)
             log[f"{key_prefix}/hos_peaks_dist"] = metrics["hos_peaks"]
-            print(f"HOS peaks [{label}]: chi-like dist = {metrics['hos_peaks']:.4g}")
+            print(f"HOS peaks [{label}]: {metrics['hos_peaks']:.4g}")
 
         if ckpt_metric_weights.get("hos_l1", 0):
             metrics["hos_l1"] = hos_l1_distance(maps_ref, maps_gen)
             log[f"{key_prefix}/hos_l1_dist"] = metrics["hos_l1"]
-            print(f"HOS L1-norms [{label}]: chi-like dist = {metrics['hos_l1']:.4g}")
+            print(f"HOS L1-norms [{label}]: {metrics['hos_l1']:.4g}")
 
         if ckpt_metric_weights.get("scattering", 0):
             metrics["scattering"] = scattering_distance(maps_ref, maps_gen)
             log[f"{key_prefix}/scattering_dist"] = metrics["scattering"]
-            print(f"Scattering [{label}]: chi-like dist = {metrics['scattering']:.4g}")
+            print(f"Scattering [{label}]: {metrics['scattering']:.4g}")
 
         if extra_log:
             log.update(extra_log)
@@ -523,6 +619,7 @@ def _run_map_eval(model, label, seed, fig_path, key_prefix, extra_log=None):
         return metrics
     except Exception as e:
         print(f"Map eval [{label}] failed: {e}")
+        import traceback; traceback.print_exc()
         return {}
 
 

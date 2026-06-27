@@ -342,6 +342,8 @@ class RegressionModelNoPatch(L.LightningModule):
       sq_error = (y - mean) ** 2
       score = -torch.sum(sq_error / std**2 + torch.log(std**2) + 1000.0 * sq_error, dim=1)
       loss = -torch.mean(score)
+    elif self.hparams.loss_type == "mse":
+      loss = F.mse_loss(mean, y)
     self.log('train_loss', loss)
     return loss
 
