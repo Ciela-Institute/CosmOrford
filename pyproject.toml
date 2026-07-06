@@ -54,6 +54,8 @@ dependencies = [
     "getdist",
     "wl_stats_torch",
     "kymatio",
+    "tarp",
+    "mira_score",
 ]
 
 [project.optional-dependencies]

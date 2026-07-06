@@ -2,13 +2,9 @@
 
 For each budget checkpoint from the compressor budget scan:
 1. Load frozen compressor
-2. Pre-compute summaries from holdout data (already noisy; no extra noise)
+2. Pre-compute summaries with noise augmentation on holdout data
 3. Train NPE (conditional MAF) on (summary, theta) pairs
 4. Evaluate FoM at fiducial cosmology
-
-Compressor loading is configurable via `compressor_class_path`, so the same
-runner can be used for CNN-based and analytical-summary compressors as long as
-the model exposes `compress(x) -> (B, context_dim)`.
 
 Usage (Modal):
     .venv/bin/modal run scripts/run_npe_budget_scan.py
@@ -24,111 +20,116 @@ Usage (local):
 
     All training hyperparameters are read from --config (YAML file).
 """
+
 from dataclasses import dataclass, field
+from glob import glob
 from pathlib import Path
 from typing import List
-from glob import glob
-import importlib
-import os
-import re
-import shutil
 
 
 @dataclass
 class NPEConfig:
-    budgets: List[int] = field(default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200])
+    budgets: List[int] = field(
+        default_factory=lambda: [100, 200, 500, 1000, 2000, 5000, 10000, 20200]
+    )
+    # Importable compressor class to load frozen for summary extraction. Must expose
+    # `compress(x) -> (B, context_dim)` and the RegressionModelNoPatch-compatible
+    # forward/hparams interface. Defaults to the CNN compressor; set to
+    # "cosmoford.models_nopatch.StatsCompressorNoPatch" for analytical-summary runs.
     compressor_class_path: str = "cosmoford.models_nopatch.RegressionModelNoPatch"
-    checkpoint_metric_name: str = "val_log_prob"
-    checkpoint_mode: str = "min"  # one of ["min", "max"]
-    wandb_entity: str = "cosmostat"
-    wandb_project: str = "neurips-wl-challenge-hos-compression"
-    wandb_budget_tag: str = "budget-scan"
-    log_npe_to_wandb: bool = True
-    wandb_npe_entity: str = "cosmostat"
-    wandb_npe_project: str = "neurips-wl-challenge-hos-npe"
-    wandb_npe_tags: List[str] = field(default_factory=lambda: ["hos-npe", "inference"])
-    wandb_npe_log_images: bool = True
-    wandb_npe_log_model_paths: bool = True
     n_noise_realizations: int = 1
-    n_holdout_train_maps: int = 0  # 0 means "use all"
     npe_epochs: int = 500
     npe_lr: float = 1e-3
     npe_batch_size: int = 512
-    npe_patience: int = 5
+    npe_patience: int = 50
     npe_seeds: int = 5
-    flow_transforms: int = 4
-    flow_hidden_dim: int = 64
-    normalize_context: bool = False
-    use_raw_stats_context: bool = False
+    n_transforms: int = 4
+    hidden_dim: int = 64
     n_posterior_samples: int = 10_000
-    n_fiducial_maps: int = 0  # 0 means "use all"
-    save_npe_seed_checkpoints: bool = True
-    save_npe_seed_training_summary: bool = True
-    save_posterior_samples: bool = True
-    save_posterior_plots: bool = True
-    posterior_plot_bins: int = 80
-    use_getdist_contours: bool = True
+    # Calibration validation (TARP + MIRA) on the flat dataset validation split
+    n_val_maps: int = 500
+    n_val_posterior_samples: int = 1000
+    # "ensemble" samples uniformly from all npe_seeds flows (better calibration);
+    # "best" samples only from the single lowest-val_nll flow (sharper, less robust)
+    inference_mode: str = "ensemble"
 
     @classmethod
     def from_yaml(cls, path: str) -> "NPEConfig":
         import yaml
+
         with open(path) as f:
             data = yaml.safe_load(f)
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 def _load_class(class_path: str):
+    """Import and return a class from a fully-qualified 'module.ClassName' path.
+
+    Lets the runner load any compressor exposing the shared `compress()` interface
+    (e.g. RegressionModelNoPatch or StatsCompressorNoPatch) instead of hardcoding one.
+    """
+    import importlib
+
     module_name, class_name = class_path.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, class_name)
 
 
-def find_best_checkpoint_for_metric(
-    budget: int,
-    checkpoints_path: Path,
-    metric_name: str,
-    mode: str,
-    offline: bool = False,
-    wandb_entity: str = "cosmostat",
-    wandb_project: str = "neurips-wl-challenge",
-    wandb_budget_tag: str = "budget-scan",
+def find_best_checkpoint(
+    budget: int, checkpoints_path: Path, offline: bool = False
 ) -> str:
-    """Find the best checkpoint for a budget by parsing metric from checkpoint filename.
+    """Find the best compressor checkpoint for a given budget.
 
-    Supports configurable metric names and optimization direction for compressor variants.
+    Strategy:
+    1. Parse val_mse from Lightning checkpoint filenames, pick lowest
+    2. Fall back to last.ckpt
+    3. Fall back to W&B artifact download (skipped when offline=True)
     """
-    if mode not in {"min", "max"}:
-        raise ValueError(f"checkpoint_mode must be 'min' or 'max', got '{mode}'")
+    import re
 
     checkpoint_dir = checkpoints_path / f"budget-{budget}"
-    checkpoints = glob(str(checkpoint_dir) + "/**/*.ckpt", recursive=True)
+    checkpoints = str(checkpoint_dir)
+    # print(checkpoints)
+    checkpoints = glob(checkpoints + "/**/*.ckpt", recursive=True)
 
+    # for ckpt in checkpoint_dir.glob("*.ckpt"):
+    #     print(ckpt)
+    # Strategy 1: Parse the monitored val loss from checkpoint filenames, pick lowest.
+    # Filenames are written as "step=<N>-<metric>=<value>.ckpt"; the metric name varies
+    # (val_log_prob for the Gaussian-head loss, val_nll for use_flow=True) depending on
+    # which training config produced the checkpoint, so try both. If the parsed values
+    # are degenerate (e.g. older runs whose filename embeds a metric that was never
+    # logged for that hparams.use_flow setting, so every checkpoint shows the same
+    # placeholder value), the metric carries no information -- break ties by picking
+    # the highest training step instead of silently keeping whichever file glob()
+    # happened to list first.
     if checkpoint_dir.exists():
-        best_path = None
-        best_val = float("inf") if mode == "min" else -float("inf")
-        pattern = re.compile(rf"{re.escape(metric_name)}=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
-
+        candidates = []  # (loss_value, step, path)
         for ckpt in checkpoints:
-            if ckpt.endswith("last.ckpt"):
+            print(ckpt)
+            if Path(ckpt).name == "last.ckpt":
                 continue
-            match = pattern.search(ckpt)
-            if not match:
-                continue
-            val = float(match.group(1))
-            better = val < best_val if mode == "min" else val > best_val
-            if better:
-                best_val = val
-                best_path = str(ckpt)
+            match = re.search(r"val_(?:log_prob|nll)=([-+]?\d*\.?\d+)", ckpt)
+            step_match = re.search(r"(?:step|epoch)=(\d+)", ckpt)
+            if match:
+                candidates.append(
+                    (float(match.group(1)), int(step_match.group(1)) if step_match else 0, str(ckpt))
+                )
 
-        if best_path is not None:
+        if candidates:
+            best_loss = min(c[0] for c in candidates)
+            tied = [c for c in candidates if c[0] == best_loss]
+            best_loss, best_step, best_path = max(tied, key=lambda c: c[1])
             print(
                 f"Found best checkpoint for budget-{budget}: {best_path} "
-                f"({metric_name}={best_val:.6f}, mode={mode})"
+                f"(val_loss={best_loss:.6f}, step={best_step}, "
+                f"{len(tied)}/{len(candidates)} tied)"
             )
             return best_path
 
+        # Strategy 2: Fall back to last.ckpt (skip if empty/corrupted)
         last_ckpt = checkpoint_dir / "last.ckpt"
-        if last_ckpt.exists():
+        if last_ckpt.exists() and last_ckpt.stat().st_size > 0:
             print(f"Using last.ckpt for budget-{budget}")
             return str(last_ckpt)
 
@@ -138,13 +139,14 @@ def find_best_checkpoint_for_metric(
             f"and --offline is set (W&B download disabled)."
         )
 
+    # Strategy 3: W&B fallback
     print(f"No local checkpoint for budget-{budget}, trying W&B...")
     import wandb
 
     api = wandb.Api()
     runs = api.runs(
-        f"{wandb_entity}/{wandb_project}",
-        filters={"tags": wandb_budget_tag, "display_name": f"budget-{budget}"},
+        "cosmostat/neurips-wl-challenge",
+        filters={"tags": "budget-scan", "display_name": f"budget-{budget}"},
     )
     for run in runs:
         for art in run.logged_artifacts():
@@ -157,117 +159,18 @@ def find_best_checkpoint_for_metric(
     raise FileNotFoundError(f"No checkpoint found for budget-{budget}")
 
 
-def _hist_credible_levels(hist2d, probs=(0.68, 0.95)):
-    import numpy as np
-
-    h = np.asarray(hist2d, dtype=np.float64)
-    flat = h.ravel()
-    if flat.size == 0 or np.all(flat <= 0):
-        return [0.0 for _ in probs]
-    idx = np.argsort(flat)[::-1]
-    sorted_vals = flat[idx]
-    cdf = np.cumsum(sorted_vals)
-    cdf = cdf / cdf[-1]
-    levels = []
-    for p in probs:
-        k = int(np.searchsorted(cdf, p, side="left"))
-        k = min(max(k, 0), sorted_vals.size - 1)
-        levels.append(float(sorted_vals[k]))
-    return levels
-
-
-def _save_posterior_plot(samples_phys, output_path: Path, bins: int, title: str):
-    import numpy as np
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    samples_phys = np.asarray(samples_phys)
-    fig, ax = plt.subplots(figsize=(5.8, 4.8))
-    h = ax.hist2d(samples_phys[:, 0], samples_phys[:, 1], bins=bins, cmap="magma")
-    ax.set_xlabel(r"$\Omega_m$")
-    ax.set_ylabel(r"$S_8$")
-    ax.set_title(title)
-    cbar = fig.colorbar(h[3], ax=ax)
-    cbar.set_label("Posterior sample density")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
-
-
-def _save_getdist_contour_plot(samples_phys, output_path: Path, title: str):
-    import numpy as np
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    try:
-        from getdist import MCSamples
-        from getdist import plots as getdist_plots
-    except ImportError as exc:
-        raise RuntimeError(
-            "getdist is required for getdist-based contour plots. "
-            "Install it with: pip install getdist"
-        ) from exc
-
-    samples_phys = np.asarray(samples_phys, dtype=np.float64)
-    gd_samples = MCSamples(
-        samples=samples_phys,
-        names=["omegam", "s8"],
-        labels=[r"\Omega_m", r"S_8"],
-    )
-    plotter = getdist_plots.get_single_plotter(width_inch=5.8, ratio=0.85)
-    plotter.settings.num_plot_contours = 2
-    plotter.settings.alpha_filled_add = 0.65
-    plotter.plot_2d(gd_samples, "omegam", "s8", filled=True)
-    ax = plt.gca()
-    ax.set_title(title)
-    plotter.fig.tight_layout()
-    plotter.fig.savefig(output_path, dpi=160)
-    plt.close(plotter.fig)
-
-
-def _save_hist_contour_plot(samples_phys, output_path: Path, bins: int, title: str):
-    import numpy as np
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    samples_phys = np.asarray(samples_phys)
-    hist, xedges, yedges = np.histogram2d(
-        samples_phys[:, 0],
-        samples_phys[:, 1],
-        bins=bins,
-        density=True,
-    )
-    xcenters = 0.5 * (xedges[:-1] + xedges[1:])
-    ycenters = 0.5 * (yedges[:-1] + yedges[1:])
-    xx, yy = np.meshgrid(xcenters, ycenters, indexing="xy")
-    zz = hist.T  # contour expects (len(y), len(x))
-    levels = _hist_credible_levels(zz, probs=(0.68, 0.95))
-    levels = sorted(set(levels))
-    if len(levels) == 1:
-        levels = [max(levels[0] * 0.5, 1e-12), levels[0]]
-
-    fig, ax = plt.subplots(figsize=(5.8, 4.8))
-    ax.contourf(xx, yy, zz, levels=24, cmap="magma", alpha=0.55)
-    ax.contour(
-        xx,
-        yy,
-        zz,
-        levels=levels,
-        colors=["#4E79A7", "#E15759"][: len(levels)],
-        linewidths=2.0,
-    )
-    ax.scatter(samples_phys[:, 0], samples_phys[:, 1], s=1.0, alpha=0.08, color="black")
-    ax.set_xlabel(r"$\Omega_m$")
-    ax.set_ylabel(r"$S_8$")
-    ax.set_title(title)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
-
-
-def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summaries_cache_path, load_holdout, cfg: NPEConfig, offline: bool = False, vol=None):
+def _train_budget_core(
+    budget: int,
+    checkpoints_path,
+    npe_results_path,
+    summaries_cache_path,
+    load_holdout,
+    cfg: NPEConfig,
+    offline: bool = False,
+    vol=None,
+    load_flat_val=None,
+    context_normalization: bool = False,
+):
     """Core NPE pipeline, independent of Modal or local execution.
 
     Args:
@@ -277,136 +180,79 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         summaries_cache_path: Path for caching pre-computed summaries
         load_holdout: callable(split: str) -> HuggingFace Dataset
         cfg: NPEConfig with all training hyperparameters
-        offline: if True, disable W&B checkpoint fallback and raise if no local checkpoint found
-        vol: optional modal.Volume; if provided, .reload()/.commit() are called around I/O
+        offline: if True, disable W&B checkpoint fallback and raise if no local
+            checkpoint found
+        vol: optional modal.Volume; if provided, .reload()/.commit() are called
+            around I/O
+        context_normalization: if True, enable context normalization
     """
     import json
+    import os
 
     import numpy as np
     import torch
+    import torch.nn.functional as F
 
-    from cosmoford import THETA_MEAN, THETA_STD, SURVEY_MASK
+    import wandb
+    from cosmoford import THETA_MEAN, THETA_STD
     from cosmoford.dataset import reshape_field_numpy
-    from cosmoford.models_nopatch import build_flow
-
-    import os
+    from cosmoford.models_nopatch import RegressionModelNoPatch, build_flow
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*60}")
     print(f"Budget {budget}: starting NPE pipeline")
     print(f"{'='*60}")
     print(f"Config: {cfg}")
-    if cfg.npe_seeds <= 0:
-        raise ValueError(f"npe_seeds must be > 0, got {cfg.npe_seeds}")
-    if cfg.npe_epochs <= 0:
-        raise ValueError(f"npe_epochs must be > 0, got {cfg.npe_epochs}")
-    if cfg.npe_batch_size <= 0:
-        raise ValueError(f"npe_batch_size must be > 0, got {cfg.npe_batch_size}")
+
+    _wandb_config = {
+        "budget": budget,
+        "npe_epochs": cfg.npe_epochs,
+        "npe_lr": cfg.npe_lr,
+        "npe_batch_size": cfg.npe_batch_size,
+        "npe_patience": cfg.npe_patience,
+        "npe_seeds": cfg.npe_seeds,
+        "n_noise_realizations": cfg.n_noise_realizations,
+        "n_posterior_samples": cfg.n_posterior_samples,
+    }
+    _wandb_kwargs = dict(
+        entity="cosmostat",
+        project="neurips-wl-challenge",
+        mode=os.environ.get("WANDB_MODE", "offline"),
+        config=_wandb_config,
+        dir=str(npe_results_path),
+    )
 
     if vol is not None:
         vol.reload()
 
-    wandb_run = None
-    if cfg.log_npe_to_wandb:
-        import wandb
-
-        run_name = f"{checkpoints_path.name or 'checkpoints'}-budget-{budget}"
-        run_tags = list(dict.fromkeys([*(cfg.wandb_npe_tags or []), f"budget-{budget}"]))
-        wandb_dir = npe_results_path / f"budget-{budget}"
-        wandb_dir.mkdir(parents=True, exist_ok=True)
-        wandb_run = wandb.init(
-            entity=cfg.wandb_npe_entity,
-            project=cfg.wandb_npe_project,
-            name=run_name,
-            mode=os.environ.get("WANDB_MODE", "offline"),
-            dir=str(wandb_dir),
-            tags=run_tags,
-            config={
-                "budget": int(budget),
-                "compressor_class_path": cfg.compressor_class_path,
-                "checkpoint_metric_name": cfg.checkpoint_metric_name,
-                "checkpoint_mode": cfg.checkpoint_mode,
-                "n_noise_realizations": int(cfg.n_noise_realizations),
-                "n_holdout_train_maps": int(cfg.n_holdout_train_maps),
-                "npe_epochs": int(cfg.npe_epochs),
-                "npe_lr": float(cfg.npe_lr),
-                "npe_batch_size": int(cfg.npe_batch_size),
-                "npe_patience": int(cfg.npe_patience),
-                "npe_seeds": int(cfg.npe_seeds),
-                "flow_transforms": int(cfg.flow_transforms),
-                "flow_hidden_dim": int(cfg.flow_hidden_dim),
-                "use_raw_stats_context": bool(cfg.use_raw_stats_context),
-                "n_posterior_samples": int(cfg.n_posterior_samples),
-                "n_fiducial_maps": int(cfg.n_fiducial_maps),
-                "save_npe_seed_checkpoints": bool(cfg.save_npe_seed_checkpoints),
-                "save_npe_seed_training_summary": bool(cfg.save_npe_seed_training_summary),
-            },
-        )
-
     # ── 1-3. Load or compute summaries ──
-    class_tag = cfg.compressor_class_path.split(".")[-1]
-    checkpoints_tag = checkpoints_path.name or "checkpoints"
-    context_tag = "rawstats" if cfg.use_raw_stats_context else "compressed"
-    cache_dir = summaries_cache_path / checkpoints_tag / class_tag / context_tag / f"budget-{budget}"
+    cache_dir = summaries_cache_path / f"budget-{budget}"
     cache_file = cache_dir / f"summaries_n{cfg.n_noise_realizations}.pt"
     compressor = None  # loaded lazily for FoM eval
-    compressor_cls = _load_class(cfg.compressor_class_path)
 
-    use_cache = cache_file.exists()
-    if use_cache:
+    if cache_file.exists():
         print(f"Loading cached summaries from {cache_file}")
         cached = torch.load(cache_file, map_location="cpu", weights_only=False)
-        cache_class = cached.get("compressor_class_path")
-        cache_metric = cached.get("checkpoint_metric_name")
-        cache_mode = cached.get("checkpoint_mode")
-        cache_raw_stats = bool(cached.get("use_raw_stats_context", False))
-        if (
-            cache_class != cfg.compressor_class_path
-            or cache_metric != cfg.checkpoint_metric_name
-            or cache_mode != cfg.checkpoint_mode
-            or cache_raw_stats != bool(cfg.use_raw_stats_context)
-        ):
-            print(
-                "Cached summaries are incompatible with current compressor/metric settings; "
-                "recomputing cache."
-            )
-            use_cache = False
-    if use_cache:
         summaries_tensor = cached["summaries"]
         thetas_tensor = cached["thetas"]
         theta_all = cached["theta_all_raw"]  # unnormalized, for FoM eval
-        n_maps = int(theta_all.shape[0])
         ckpt_path = cached["compressor_checkpoint"]
         print(
-            f"Loaded {summaries_tensor.shape[0]} cached pairs "
-            f"(compressor: {ckpt_path}, class: {cfg.compressor_class_path}, "
-            f"context_mode: {context_tag})"
+            f"Loaded {summaries_tensor.shape[0]} cached pairs (compressor: {ckpt_path})"
         )
-    if not use_cache:
+    else:
         print("No cached summaries found, computing from scratch...")
 
         # ── 1. Load frozen compressor ──
-        ckpt_path = find_best_checkpoint_for_metric(
-            budget,
-            checkpoints_path,
-            metric_name=cfg.checkpoint_metric_name,
-            mode=cfg.checkpoint_mode,
-            offline=offline,
-            wandb_entity=cfg.wandb_entity,
-            wandb_project=cfg.wandb_project,
-            wandb_budget_tag=cfg.wandb_budget_tag,
+        ckpt_path = find_best_checkpoint(budget, checkpoints_path, offline=offline)
+        compressor = _load_class(cfg.compressor_class_path).load_from_checkpoint(
+            ckpt_path, map_location=device
         )
-        compressor = compressor_cls.load_from_checkpoint(ckpt_path, map_location=device)
         compressor.eval()
         compressor.to(device)
         for p in compressor.parameters():
             p.requires_grad = False
-        print(f"Loaded compressor from {ckpt_path} ({cfg.compressor_class_path})")
-        if cfg.use_raw_stats_context and not hasattr(compressor, "_compute_stats"):
-            raise AttributeError(
-                "use_raw_stats_context=True requires compressor class to expose _compute_stats(x). "
-                f"Got class {cfg.compressor_class_path} without that method."
-            )
+        print(f"Loaded compressor from {ckpt_path}")
 
         # ── 2. Load holdout dataset ──
         print("Loading holdout dataset...")
@@ -420,23 +266,13 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         theta_norm = (theta_all[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]
         theta_norm = theta_norm.astype(np.float32)
 
-        if cfg.n_holdout_train_maps > 0:
-            kappa_all = kappa_all[:cfg.n_holdout_train_maps]
-            theta_all = theta_all[:cfg.n_holdout_train_maps]
-
         n_maps = len(kappa_all)
-        print(
-            f"Holdout train maps used: {n_maps}"
-            + (f" (requested={cfg.n_holdout_train_maps})" if cfg.n_holdout_train_maps > 0 else "")
-        )
+        print(f"Holdout: {n_maps} maps")
 
-        # Build reduced mask (same reshaped geometry as dataloader input)
-        mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
-
-        # ── 3. Pre-compute summaries (holdout maps already include noise) ──
+        # ── 3. Pre-compute summaries with noise augmentation ──
         print(
-            "Pre-computing summaries "
-            f"({cfg.n_noise_realizations} realizations per map; no extra synthetic noise)..."
+            f"Pre-computing summaries "
+            f"({cfg.n_noise_realizations} noise realizations per map)..."
         )
         all_summaries = []
         all_thetas = []
@@ -444,26 +280,23 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         with torch.no_grad():
             for i in range(n_maps):
                 kappa_i = kappa_all[i]  # (1424, 176)
-                kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]  # (1834, 88)
+                kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[
+                    0
+                ]  # (1834, 88)
 
                 for _ in range(cfg.n_noise_realizations):
-                    # Holdout train maps are already noisy; do not add synthetic noise again.
+                    # kappa maps from the holdout dataset are already noisy and masked
                     noisy = kappa_reshaped
                     x = torch.from_numpy(noisy).unsqueeze(0).to(device)  # (1, 1834, 88)
-                    if cfg.use_raw_stats_context:
-                        s = compressor._compute_stats(x)
-                    else:
-                        s = compressor.compress(x)
+                    s = compressor.compress(x)  # (1, 8)
                     all_summaries.append(s.cpu())
                     all_thetas.append(theta_norm[i])
 
                 if (i + 1) % 1000 == 0:
                     print(f"  Processed {i+1}/{n_maps} maps")
 
-        summaries_tensor = torch.cat(all_summaries, dim=0)  # (N*n_noise, context_dim)
+        summaries_tensor = torch.cat(all_summaries, dim=0)  # (N*n_noise, 8)
         thetas_tensor = torch.from_numpy(np.array(all_thetas))  # (N*n_noise, 2)
-        context_dim = int(summaries_tensor.shape[1])
-        print(f"Detected summary context dim: {context_dim}")
 
         # Cache to disk
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -473,10 +306,6 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 "thetas": thetas_tensor,
                 "theta_all_raw": theta_all,
                 "compressor_checkpoint": ckpt_path,
-                "compressor_class_path": cfg.compressor_class_path,
-                "checkpoint_metric_name": cfg.checkpoint_metric_name,
-                "checkpoint_mode": cfg.checkpoint_mode,
-                "use_raw_stats_context": bool(cfg.use_raw_stats_context),
                 "n_noise_realizations": cfg.n_noise_realizations,
             },
             cache_file,
@@ -486,7 +315,6 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
         print(f"Cached summaries to {cache_file}")
 
     print(f"Summary dataset: {summaries_tensor.shape[0]} pairs")
-    print(f"Summary context dim: {summaries_tensor.shape[1]}")
 
     # ── 4. Train/val split (90/10) ──
     n_total = summaries_tensor.shape[0]
@@ -502,95 +330,53 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
     s_val, t_val = summaries_tensor[val_idx], thetas_tensor[val_idx]
     print(f"Train: {n_train}, Val: {n_val}")
 
-    results_dir = npe_results_path / f"budget-{budget}"
-    results_dir.mkdir(parents=True, exist_ok=True)
+    # Context normalization stats, computed once from the training split. Must be
+    # applied consistently everywhere a context summary is fed to the flow (train,
+    # val, FoM eval, TARP/MIRA calibration) — not just during training — since the
+    # flow is trained to expect normalized context when context_normalization=True.
+    ctx_mean = s_train.mean(dim=0, keepdim=True) if context_normalization else None
+    ctx_std = s_train.std(dim=0, keepdim=True) if context_normalization else None
 
-    # ── 4b. Compressor linear probe (precision vs truth) ──
-    try:
-        from sklearn.linear_model import Ridge
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        s_tr_np = s_train.cpu().numpy()
-        s_va_np = s_val.cpu().numpy()
-        t_tr_np = t_train.cpu().numpy()
-        t_va_np = t_val.cpu().numpy()
-
-        probe = Ridge(alpha=1e-3).fit(s_tr_np, t_tr_np)
-        t_pred_tr_norm = probe.predict(s_tr_np)
-        t_pred_va_norm = probe.predict(s_va_np)
-
-        t_pred_tr_phys = t_pred_tr_norm * THETA_STD[:2] + THETA_MEAN[:2]
-        t_true_tr_phys = t_tr_np * THETA_STD[:2] + THETA_MEAN[:2]
-        t_pred_va_phys = t_pred_va_norm * THETA_STD[:2] + THETA_MEAN[:2]
-        t_true_va_phys = t_va_np * THETA_STD[:2] + THETA_MEAN[:2]
-
-        param_labels = [r"$\Omega_m$", r"$S_8$"]
-        fig, axes = plt.subplots(1, 2, figsize=(9, 4))
-        for i, (ax, lbl) in enumerate(zip(axes, param_labels)):
-            lo = min(t_true_va_phys[:, i].min(), t_pred_va_phys[:, i].min())
-            hi = max(t_true_va_phys[:, i].max(), t_pred_va_phys[:, i].max())
-            ax.scatter(t_true_tr_phys[:, i], t_pred_tr_phys[:, i],
-                       s=1, alpha=0.2, color="tab:blue", label="train")
-            ax.scatter(t_true_va_phys[:, i], t_pred_va_phys[:, i],
-                       s=2, alpha=0.5, color="tab:orange", label="val")
-            ax.plot([lo, hi], [lo, hi], "r--", lw=1.2)
-            ax.set_xlabel(f"True {lbl}")
-            ax.set_ylabel(f"Predicted {lbl}")
-            ax.legend(fontsize=8)
-        fig.suptitle(f"Compressor linear probe – train (blue) / val (orange) – budget {budget}")
-        fig.tight_layout()
-        probe_plot_path = results_dir / "compressor_linear_probe.png"
-        fig.savefig(probe_plot_path, dpi=120)
-        plt.close(fig)
-        print(f"Saved compressor precision-vs-truth plot: {probe_plot_path}")
-    except Exception as e:
-        print(f"Warning: compressor linear probe plot failed ({e})")
-
-    context_mean = None
-    context_std = None
-    if cfg.normalize_context:
-        context_mean = s_train.mean(dim=0, keepdim=True)
-        context_std = s_train.std(dim=0, keepdim=True).clamp_min(1e-6)
-        s_train = (s_train - context_mean) / context_std
-        s_val = (s_val - context_mean) / context_std
-        print("Applied NPE context normalization from training summaries.")
+    def _normalize_context(s):
+        if not context_normalization:
+            return s
+        return (s - ctx_mean.to(s.device)) / ctx_std.to(s.device)
 
     train_dataset = torch.utils.data.TensorDataset(s_train, t_train)
     val_dataset = torch.utils.data.TensorDataset(s_val, t_val)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.npe_batch_size, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=cfg.npe_batch_size, shuffle=True
+    )
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.npe_batch_size)
 
     # ── 5. Train NPE (multiple seeds, keep best) ──
+    results_dir = npe_results_path / f"budget-{budget}"
+    results_dir.mkdir(parents=True, exist_ok=True)
 
+    wandb.init(name=f"npe_budget_{budget}", **_wandb_kwargs)
     overall_best_nll = float("inf")
-    overall_best_state = None
-    seed_ckpt_files = []
-    seed_best_val_nlls = []
-    seed_epoch_counts = []
-    training_history = []
-    npe_curve_rows = []
+    best_seed_idx = 0
+
+    seed_states = []
 
     for seed in range(cfg.npe_seeds):
         print(f"\n--- NPE seed {seed+1}/{cfg.npe_seeds} ---")
 
-        torch.manual_seed(seed + 42)
-        context_dim = summaries_tensor.shape[1]
+        torch.manual_seed(seed + 92)
         flow = build_flow(
             param_dim=2,
-            context_dim=context_dim,
-            n_transforms=cfg.flow_transforms,
-            hidden_dim=cfg.flow_hidden_dim,
+            context_dim=8,
+            n_transforms=cfg.n_transforms,
+            hidden_dim=cfg.hidden_dim,
         ).to(device)
         optimizer = torch.optim.Adam(flow.parameters(), lr=cfg.npe_lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.npe_epochs)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cfg.npe_epochs
+        )
 
         best_val_nll = float("inf")
         patience_counter = 0
         best_state = None
-        seed_ckpt_name = None
-        epochs_trained = 0
 
         for epoch in range(cfg.npe_epochs):
             # Train
@@ -598,6 +384,7 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             train_losses = []
             for s_batch, t_batch in train_loader:
                 s_batch, t_batch = s_batch.to(device), t_batch.to(device)
+                s_batch = _normalize_context(s_batch)
                 loss = -flow.log_prob(t_batch, context=s_batch).mean()
                 optimizer.zero_grad()
                 loss.backward()
@@ -612,16 +399,20 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
             with torch.no_grad():
                 for s_batch, t_batch in val_loader:
                     s_batch, t_batch = s_batch.to(device), t_batch.to(device)
-                    val_losses.append(-flow.log_prob(t_batch, context=s_batch).mean().item())
+                    s_batch = _normalize_context(s_batch)
+                    val_losses.append(
+                        -flow.log_prob(t_batch, context=s_batch).mean().item()
+                    )
 
             mean_train = np.mean(train_losses)
             mean_val = np.mean(val_losses)
-            npe_curve_rows.append(
+
+            wandb.log(
                 {
-                    "seed_index": int(seed),
-                    "epoch": int(epoch + 1),
-                    "train_nll": float(mean_train),
-                    "val_nll": float(mean_val),
+                    f"seed{seed+1}/train_nll": mean_train,
+                    f"seed{seed+1}/val_nll": mean_val,
+                    f"seed{seed+1}/lr": optimizer.param_groups[0]["lr"],
+                    f"seed{seed+1}/epoch": epoch,
                 }
             )
 
@@ -633,165 +424,182 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 patience_counter += 1
 
             if (epoch + 1) % 50 == 0 or patience_counter == 0:
-                print(f"  Epoch {epoch+1:3d}: train_nll={mean_train:.4f}, val_nll={mean_val:.4f}, "
-                      f"best={best_val_nll:.4f}, patience={patience_counter}/{cfg.npe_patience}")
-            if wandb_run is not None:
-                wandb_run.log(
-                    {
-                        "npe/seed_index": int(seed),
-                        "npe/epoch": int(epoch + 1),
-                        "npe/train_nll": float(mean_train),
-                        "npe/val_nll": float(mean_val),
-                        "npe/best_val_nll_seed": float(best_val_nll),
-                        "npe/lr": float(optimizer.param_groups[0]["lr"]),
-                    }
+                print(
+                    f"  Epoch {epoch+1:3d}: train_nll={mean_train:.4f}, "
+                    f"val_nll={mean_val:.4f}, best={best_val_nll:.4f}, "
+                    f"patience={patience_counter}/{cfg.npe_patience}"
                 )
 
-            epochs_trained = int(epoch + 1)
             if patience_counter >= cfg.npe_patience:
                 print(f"  Early stopping at epoch {epoch+1}")
                 break
 
-        seed_epoch_counts.append(epochs_trained)
-        seed_best_val_nlls.append(float(best_val_nll))
-        if cfg.save_npe_seed_checkpoints and best_state is not None:
-            seed_ckpt_name = f"npe_flow_seed{seed:02d}_best.pt"
-            seed_ckpt_path = results_dir / seed_ckpt_name
-            torch.save(best_state, seed_ckpt_path)
-            seed_ckpt_files.append(seed_ckpt_name)
-        if cfg.save_npe_seed_training_summary:
-            training_history.append(
-                {
-                    "seed_index": int(seed),
-                    "best_val_nll": float(best_val_nll),
-                    "epochs_trained": epochs_trained,
-                    "best_checkpoint_file": seed_ckpt_name,
-                }
-            )
-
         print(f"  Seed {seed+1} best val NLL: {best_val_nll:.4f}")
-        if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "npe/seed_index": int(seed),
-                    "npe/seed_best_val_nll": float(best_val_nll),
-                    "npe/seed_epochs_trained": int(epochs_trained),
-                }
-            )
+        wandb.log({f"seed{seed+1}/best_val_nll": best_val_nll})
+
+        seed_states.append(best_state)
         if best_val_nll < overall_best_nll:
             overall_best_nll = best_val_nll
-            overall_best_state = best_state
+            best_seed_idx = seed
 
-    # Restore overall best model
-    context_dim = summaries_tensor.shape[1]
-    flow = build_flow(
-        param_dim=2,
-        context_dim=context_dim,
-        n_transforms=cfg.flow_transforms,
-        hidden_dim=cfg.flow_hidden_dim,
-    ).to(device)
-    flow.load_state_dict(overall_best_state)
-    flow.eval()
+    # Build an ensemble from every seed's best checkpoint instead of keeping only the
+    # seed with lowest val_nll. Picking a single "best-by-val_nll" flow selects for
+    # sharpness, not calibration, which is why MIRA/TARP coverage drifted inconsistently
+    # across budgets; sampling from a uniform mixture over the ensemble (a standard
+    # deep-ensemble calibration trick) damps that per-seed overfitting noise.
+    ensemble_flows = []
+    for state in seed_states:
+        f = build_flow(
+            param_dim=2,
+            context_dim=8,
+            n_transforms=cfg.n_transforms,
+            hidden_dim=cfg.hidden_dim,
+        ).to(device)
+        f.load_state_dict(state)
+        f.eval()
+        ensemble_flows.append(f)
     best_val_nll = overall_best_nll
-    print(f"\n✓ Restored overall best model from seed with val_nll={best_val_nll:.4f}")
-    print(f"Overall best val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f}")
-    if wandb_run is not None:
-        wandb_run.log({"npe/best_val_nll_overall": float(best_val_nll)})
 
-    npe_learning_curve_plot_file = None
-    if npe_curve_rows:
-        curves_csv_path = results_dir / "npe_learning_curves.csv"
-        with curves_csv_path.open("w") as f:
-            f.write("seed_index,epoch,train_nll,val_nll\n")
-            for row in npe_curve_rows:
-                f.write(
-                    f"{row['seed_index']},{row['epoch']},{row['train_nll']:.8f},{row['val_nll']:.8f}\n"
-                )
-        try:
-            import matplotlib
+    def _fit_mixture_weights(flows, n_iter=500, tol=1e-7):
+        """Mixture weights (on the simplex) that minimize the NLL of `flows` on
+        the shared (s_val, t_val) split, with the per-flow log_probs held fixed.
 
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
+        For fixed components, -log(sum_k w_k p_k) is convex in w, so this is a
+        convex problem with a unique global optimum; EM (fixed-point iteration
+        on the responsibilities) converges to it monotonically.
+        """
+        with torch.no_grad():
+            s_val_n = _normalize_context(s_val.to(device))
+            t_val_d = t_val.to(device)
+            log_p = torch.stack(
+                [f.log_prob(t_val_d, context=s_val_n) for f in flows], dim=0
+            )  # (K, N)
 
-            fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-            for seed in range(cfg.npe_seeds):
-                seed_rows = [r for r in npe_curve_rows if r["seed_index"] == seed]
-                if not seed_rows:
-                    continue
-                epochs = [r["epoch"] for r in seed_rows]
-                train_vals = [r["train_nll"] for r in seed_rows]
-                val_vals = [r["val_nll"] for r in seed_rows]
-                axes[0].plot(epochs, train_vals, linewidth=1.4, label=f"seed {seed+1}")
-                axes[1].plot(epochs, val_vals, linewidth=1.4, label=f"seed {seed+1}")
+        n_members = log_p.shape[0]
+        w = torch.full((n_members,), 1.0 / n_members, device=log_p.device)
+        nll_uniform = -torch.logsumexp(
+            log_p - np.log(n_members), dim=0
+        ).mean().item()
+        for _ in range(n_iter):
+            log_joint = torch.log(w.clamp_min(1e-12)).unsqueeze(1) + log_p  # (K, N)
+            resp = torch.softmax(log_joint, dim=0)  # responsibilities, (K, N)
+            w_new = resp.mean(dim=1)
+            w_new = w_new / w_new.sum()
+            if torch.max(torch.abs(w_new - w)) < tol:
+                w = w_new
+                break
+            w = w_new
+        nll_fitted = -torch.logsumexp(
+            torch.log(w.clamp_min(1e-12)).unsqueeze(1) + log_p, dim=0
+        ).mean().item()
+        print(
+            f"  Mixture weight fit: val NLL uniform={nll_uniform:.4f} -> "
+            f"fitted={nll_fitted:.4f}"
+        )
+        print(f"  Fitted weights: {np.round(w.cpu().numpy(), 4).tolist()}")
+        return w.cpu().numpy()
 
-            axes[0].set_title("NPE train NLL")
-            axes[1].set_title("NPE val NLL")
-            for ax in axes:
-                ax.set_xlabel("Epoch")
-                ax.set_ylabel("NLL")
-                ax.grid(True, alpha=0.3)
-                ax.legend(fontsize=8)
-            fig.suptitle(f"NPE learning curves – budget {budget}")
-            fig.tight_layout()
-            npe_learning_curve_plot_file = "npe_learning_curves.png"
-            npe_learning_curve_plot_path = results_dir / npe_learning_curve_plot_file
-            fig.savefig(npe_learning_curve_plot_path, dpi=130)
-            plt.close(fig)
-            print(f"Saved NPE learning curves plot: {npe_learning_curve_plot_path}")
-        except Exception as e:
-            print(f"Warning: NPE learning curves plot failed ({e})")
+    # cfg.inference_mode selects which trained seed(s) are actually used to draw
+    # posterior samples for FoM/calibration; "best" keeps only the single
+    # lowest-val_nll flow, "ensemble" pools all seeds (see NPEConfig docstring above)
+    # weighted by `mixture_weights`, fit to minimize NLL on the validation split.
+    if cfg.inference_mode == "best":
+        inference_flows = [ensemble_flows[best_seed_idx]]
+        mixture_weights = np.array([1.0])
+        print(
+            f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
+            f"(inference_mode='best': sampling only from seed {best_seed_idx + 1})"
+        )
+    else:
+        inference_flows = ensemble_flows
+        mixture_weights = _fit_mixture_weights(inference_flows)
+        print(
+            f"\nBest val NLL across {cfg.npe_seeds} seeds: {best_val_nll:.4f} "
+            f"(inference_mode='ensemble': sampling from all "
+            f"{len(inference_flows)} seeds, weights fit to minimize val NLL)"
+        )
+
+    def _sample_posterior(n_samples, context):
+        """Draw n_samples total from the mixture over `inference_flows`, with
+        component counts drawn from `mixture_weights` (uniform unless fitted)."""
+        if len(inference_flows) == 1:
+            return inference_flows[0].sample(n_samples, context=context)
+        counts = np.random.multinomial(n_samples, mixture_weights)
+        return torch.cat(
+            [
+                f.sample(int(c), context=context)
+                for f, c in zip(inference_flows, counts)
+                if c > 0
+            ],
+            dim=1,
+        )
 
     # ── 6. Compute FoM at fiducial cosmology ──
     print("Computing FoM (all fiducial maps)...")
 
     # Load compressor for FoM eval if not already loaded (cache path)
     if compressor is None:
-        compressor = compressor_cls.load_from_checkpoint(ckpt_path, map_location=device)
+        compressor = _load_class(cfg.compressor_class_path).load_from_checkpoint(
+            ckpt_path, map_location=device
+        )
         compressor.eval()
         compressor.to(device)
         for p in compressor.parameters():
             p.requires_grad = False
-    if cfg.use_raw_stats_context and not hasattr(compressor, "_compute_stats"):
-        raise AttributeError(
-            "use_raw_stats_context=True requires compressor class to expose _compute_stats(x). "
-            f"Got class {cfg.compressor_class_path} without that method."
-        )
 
-    # Load fiducial kappa maps directly (split='fiducial' contains only fiducial cosmology maps)
+    # Load fiducial kappa maps directly (split='fiducial' has only fiducial
+    # cosmology maps)
     print("Loading fiducial maps for FoM evaluation...")
     holdout = load_holdout("fiducial")
     holdout = holdout.with_format("numpy")
     kappa_all_fom = np.array(holdout["kappa"])
-    if cfg.n_fiducial_maps > 0:
-        kappa_all_fom = kappa_all_fom[:cfg.n_fiducial_maps]
+    theta_all_fom = np.array(holdout["theta"])
     print(f"  Using {len(kappa_all_fom)} fiducial maps")
 
+    from cosmoford import SURVEY_MASK
+
+    theta_mean_t = torch.tensor(THETA_MEAN[:2], device=device, dtype=torch.float32)
+    theta_std_t = torch.tensor(THETA_STD[:2], device=device, dtype=torch.float32)
+
     fom_values = []
-    store_posteriors = cfg.save_posterior_samples or cfg.save_posterior_plots
-    posterior_samples_norm = [] if store_posteriors else None
-    posterior_samples_phys = [] if store_posteriors else None
+    # compressor regression-head MSE/score, same formula as
+    # RegressionModelNoPatch.validation_step
+    mse_values = []
+    score_values = []
+    # Same MSE/score formula but computed from the NF posterior mean/std
+    # (samples_phys, respecting cfg.inference_mode) instead of the regression head.
+    mse_nf_values = []
+    score_nf_values = []
+    all_posterior_samples = []  # (n_maps, n_posterior_samples, 2) in physical units
+    # Per-observation, per-seed posterior samples for the first n_plot fiducial maps,
+    # used to diagnose how much the individual NFs disagree (wandb diagnostic plot).
+    n_plot = min(5, len(kappa_all_fom))
+    per_seed_posterior_samples = []  # (n_plot, npe_seeds, n_posterior_samples, 2)
     with torch.no_grad():
-        for kappa_i in kappa_all_fom:
+        for i, kappa_i in enumerate(kappa_all_fom):
             kappa_reshaped = reshape_field_numpy(kappa_i[np.newaxis])[0]
-            # Holdout fiducial maps are already noisy; do not add synthetic noise again.
             noisy = kappa_reshaped
             x = torch.from_numpy(noisy).unsqueeze(0).to(device)
-            if cfg.use_raw_stats_context:
-                s = compressor._compute_stats(x)
-            else:
-                s = compressor.compress(x)
-            if context_mean is not None and context_std is not None:
-                s = (s - context_mean.to(device)) / context_std.to(device)
+            mean_raw, std_raw, s = compressor(
+                x
+            )  # mean/std in normalized parameter space, s: (1, 8)
+            s = _normalize_context(s)
 
             # Sample posterior
-            samples = flow.sample(cfg.n_posterior_samples, context=s)  # (1, N, 2)
+            samples = _sample_posterior(cfg.n_posterior_samples, s)  # (1, N, 2)
             samples = samples.squeeze(0).cpu().numpy()  # (N, 2)
 
             # Unnormalize to physical parameters
             samples_phys = samples * THETA_STD[:2] + THETA_MEAN[:2]
-            if store_posteriors:
-                posterior_samples_norm.append(samples.astype(np.float32))
-                posterior_samples_phys.append(samples_phys.astype(np.float32))
+            all_posterior_samples.append(samples_phys)
+
+            if i < n_plot:
+                per_seed_samples_phys = []
+                for f in ensemble_flows:
+                    s_i = f.sample(cfg.n_posterior_samples, context=s)
+                    s_i = s_i.squeeze(0).cpu().numpy()
+                    per_seed_samples_phys.append(s_i * THETA_STD[:2] + THETA_MEAN[:2])
+                per_seed_posterior_samples.append(per_seed_samples_phys)
 
             # Compute FoM = 1 / sqrt(det(Cov))
             cov = np.cov(samples_phys.T)  # (2, 2)
@@ -802,159 +610,382 @@ def _train_budget_core(budget: int, checkpoints_path, npe_results_path, summarie
                 fom = 0.0
             fom_values.append(fom)
 
+            # Compressor regression-head mse/score against the true fiducial theta.
+            # When use_flow=True the regression head (mean_raw/std_raw) is never trained
+            # (training_step only backprops through flow.log_prob), so its outputs are
+            # meaningless -- use the flow posterior's mean/std instead.
+            y_phys = torch.tensor(
+                theta_all_fom[i, :2], device=device, dtype=torch.float32
+            ).unsqueeze(0)
+            if compressor.hparams.use_flow:
+                mean_phys = (
+                    torch.from_numpy(samples_phys.mean(axis=0))
+                    .to(device, dtype=torch.float32)
+                    .unsqueeze(0)
+                )
+                std_phys = (
+                    torch.from_numpy(samples_phys.std(axis=0))
+                    .to(device, dtype=torch.float32)
+                    .unsqueeze(0)
+                )
+            else:
+                mean_phys = mean_raw * theta_std_t + theta_mean_t
+                std_phys = std_raw * theta_std_t
+            sq_error = (y_phys - mean_phys) ** 2
+            score_i = -torch.sum(
+                sq_error / std_phys**2 + torch.log(std_phys**2) + 1000.0 * sq_error,
+                dim=1,
+            )
+            mse_i = F.mse_loss(mean_phys, y_phys)
+            score_values.append(score_i.item())
+            mse_values.append(mse_i.item())
+
+            # NF-based mse/score: same formula, but mean/std always taken from the
+            # flow posterior samples (ensemble or best, per cfg.inference_mode),
+            # regardless of compressor.hparams.use_flow.
+            mean_phys_nf = (
+                torch.from_numpy(samples_phys.mean(axis=0))
+                .to(device, dtype=torch.float32)
+                .unsqueeze(0)
+            )
+            std_phys_nf = (
+                torch.from_numpy(samples_phys.std(axis=0))
+                .to(device, dtype=torch.float32)
+                .unsqueeze(0)
+            )
+            sq_error_nf = (y_phys - mean_phys_nf) ** 2
+            score_nf_i = -torch.sum(
+                sq_error_nf / std_phys_nf**2
+                + torch.log(std_phys_nf**2)
+                + 1000.0 * sq_error_nf,
+                dim=1,
+            )
+            mse_nf_i = F.mse_loss(mean_phys_nf, y_phys)
+            score_nf_values.append(score_nf_i.item())
+            mse_nf_values.append(mse_nf_i.item())
+
     fom_mean = np.mean(fom_values)
     fom_std = np.std(fom_values)
     print(f"  FoM = {fom_mean:.2f} ± {fom_std:.2f}")
-    if wandb_run is not None:
-        wandb_run.log(
-            {
-                "fom/mean": float(fom_mean),
-                "fom/std": float(fom_std),
-                "fom/min": float(np.min(fom_values)),
-                "fom/max": float(np.max(fom_values)),
-            }
-        )
+
+    mse_mean = np.mean(mse_values)
+    mse_std = np.std(mse_values)
+    score_mean = np.mean(score_values)
+    score_std = np.std(score_values)
+    print(f"  MSE = {mse_mean:.6f} ± {mse_std:.6f}")
+    print(f"  Score = {score_mean:.2f} ± {score_std:.2f}")
+
+    mse_nf_mean = np.mean(mse_nf_values)
+    mse_nf_std = np.std(mse_nf_values)
+    score_nf_mean = np.mean(score_nf_values)
+    score_nf_std = np.std(score_nf_values)
+    print(f"  MSE (NF, {cfg.inference_mode}) = {mse_nf_mean:.6f} ± {mse_nf_std:.6f}")
+    print(
+        f"  Score (NF, {cfg.inference_mode}) = {score_nf_mean:.2f} ± {score_nf_std:.2f}"
+    )
 
     # ── 7. Save results ──
-    if best_state is None:
-        raise RuntimeError("No NPE best state found; training did not produce a checkpoint")
-    torch.save(best_state, results_dir / "npe_flow.pt")
-    seed_training_summary_file = None
-    if cfg.save_npe_seed_training_summary:
-        seed_training_summary_file = "npe_seed_training_summary.json"
-        (results_dir / seed_training_summary_file).write_text(json.dumps(training_history, indent=2))
+    torch.save(seed_states, results_dir / "npe_flow_ensemble.pt")
 
-    posterior_plot_files = []
-    posterior_contour_files = []
-    compressor_learning_curve_file = None
-    compressor_curve_src = checkpoints_path / f"budget-{budget}" / "compressor_learning_curves.png"
-    if compressor_curve_src.exists():
-        compressor_learning_curve_file = "compressor_learning_curves.png"
-        compressor_curve_dst = results_dir / compressor_learning_curve_file
-        shutil.copy2(compressor_curve_src, compressor_curve_dst)
-        print(f"Copied compressor learning curves plot: {compressor_curve_dst}")
+    # Save posterior samples: shape (n_fiducial_maps, n_posterior_samples, 2)
+    # columns: [Omega_m, S_8] in physical units
+    posterior_samples_arr = np.stack(all_posterior_samples, axis=0)
+    np.save(results_dir / "posterior_samples.npy", posterior_samples_arr)
+    print(
+        f"Posterior samples saved to {results_dir / 'posterior_samples.npy'} "
+        f"(shape {posterior_samples_arr.shape})"
+    )
 
-    if store_posteriors:
-        posterior_samples_norm = np.stack(posterior_samples_norm, axis=0)
-        posterior_samples_phys = np.stack(posterior_samples_phys, axis=0)
-
-        if cfg.save_posterior_samples:
-            norm_samples_path = results_dir / "posterior_samples_norm.npy"
-            phys_samples_path = results_dir / "posterior_samples_phys.npy"
-            np.save(norm_samples_path, posterior_samples_norm)
-            np.save(phys_samples_path, posterior_samples_phys)
-            print(f"Saved posterior samples to {norm_samples_path} and {phys_samples_path}")
-
-        if cfg.save_posterior_plots:
-            for obs_idx, samples_phys_obs in enumerate(posterior_samples_phys):
-                out_contour = results_dir / f"posterior_fiducial_obs{obs_idx:02d}_contour.png"
-                if cfg.use_getdist_contours:
-                    _save_getdist_contour_plot(
-                        samples_phys_obs,
-                        out_contour,
-                        title=f"Posterior contours (fiducial realization {obs_idx})",
-                    )
-                else:
-                    _save_hist_contour_plot(
-                        samples_phys_obs,
-                        out_contour,
-                        bins=cfg.posterior_plot_bins,
-                        title=f"Posterior contours (fiducial realization {obs_idx})",
-                    )
-                posterior_contour_files.append(out_contour.name)
-            print(f"Saved {len(posterior_contour_files)} posterior contour plot(s) to {results_dir}")
-    if wandb_run is not None and cfg.wandb_npe_log_images and cfg.save_posterior_plots:
-        import wandb
-
-        image_payload = {}
-        for obs_idx, fname in enumerate(posterior_contour_files):
-            image_payload[f"posterior/contour_obs{obs_idx:02d}"] = wandb.Image(str(results_dir / fname))
-        if npe_learning_curve_plot_file is not None:
-            image_payload["npe/learning_curves"] = wandb.Image(
-                str(results_dir / npe_learning_curve_plot_file)
-            )
-        if compressor_learning_curve_file is not None:
-            image_payload["compressor/learning_curves"] = wandb.Image(
-                str(results_dir / compressor_learning_curve_file)
-            )
-        if image_payload:
-            wandb_run.log(image_payload)
+    # Save per-seed posterior samples for the diagnostic plot:
+    # shape (n_plot, npe_seeds, n_posterior_samples, 2)
+    per_seed_samples_arr = np.stack(
+        [np.stack(obs_samples, axis=0) for obs_samples in per_seed_posterior_samples],
+        axis=0,
+    )
+    np.save(results_dir / "per_seed_posterior_samples.npy", per_seed_samples_arr)
 
     results = {
         "budget": budget,
         "fom_mean": float(fom_mean),
         "fom_std": float(fom_std),
         "fom_values": [float(v) for v in fom_values],
+        "mse_mean": float(mse_mean),
+        "mse_std": float(mse_std),
+        "mse_values": [float(v) for v in mse_values],
+        "score_mean": float(score_mean),
+        "score_std": float(score_std),
+        "score_values": [float(v) for v in score_values],
+        "mse_nf_mean": float(mse_nf_mean),
+        "mse_nf_std": float(mse_nf_std),
+        "mse_nf_values": [float(v) for v in mse_nf_values],
+        "score_nf_mean": float(score_nf_mean),
+        "score_nf_std": float(score_nf_std),
+        "score_nf_values": [float(v) for v in score_nf_values],
         "best_val_nll": float(best_val_nll),
-        "compressor_class_path": cfg.compressor_class_path,
-        "checkpoint_metric_name": cfg.checkpoint_metric_name,
-        "checkpoint_mode": cfg.checkpoint_mode,
-        "flow_transforms": cfg.flow_transforms,
-        "flow_hidden_dim": cfg.flow_hidden_dim,
-        "normalize_context": bool(cfg.normalize_context),
-        "use_raw_stats_context": bool(cfg.use_raw_stats_context),
         "n_noise_realizations": cfg.n_noise_realizations,
-        "n_holdout_train_maps_used": int(n_maps),
-        "n_holdout_train_maps_requested": int(cfg.n_holdout_train_maps),
         "n_fiducial_maps": len(kappa_all_fom),
-        "n_fiducial_maps_requested": int(cfg.n_fiducial_maps),
         "n_posterior_samples": cfg.n_posterior_samples,
-        "npe_seeds": int(cfg.npe_seeds),
-        "npe_seed_best_val_nlls": seed_best_val_nlls,
-        "npe_seed_epochs_trained": seed_epoch_counts,
         "compressor_checkpoint": ckpt_path,
-        "npe_overall_best_state_file": "npe_flow.pt",
-        "npe_seed_checkpoint_files": seed_ckpt_files if cfg.save_npe_seed_checkpoints else [],
-        "npe_seed_training_summary": training_history if cfg.save_npe_seed_training_summary else [],
-        "npe_seed_training_summary_file": seed_training_summary_file,
-        "npe_learning_curves_csv_file": "npe_learning_curves.csv" if npe_curve_rows else None,
-        "npe_learning_curves_plot_file": npe_learning_curve_plot_file,
-        "compressor_learning_curves_plot_file": compressor_learning_curve_file,
-        "save_posterior_samples": bool(cfg.save_posterior_samples),
-        "save_posterior_plots": bool(cfg.save_posterior_plots),
-        "save_npe_seed_checkpoints": bool(cfg.save_npe_seed_checkpoints),
-        "save_npe_seed_training_summary": bool(cfg.save_npe_seed_training_summary),
-        "posterior_contour_backend": "getdist" if cfg.use_getdist_contours else "hist2d",
-        "posterior_samples_norm_file": "posterior_samples_norm.npy" if cfg.save_posterior_samples else None,
-        "posterior_samples_phys_file": "posterior_samples_phys.npy" if cfg.save_posterior_samples else None,
-        "posterior_plot_files": posterior_plot_files if cfg.save_posterior_plots else [],
-        "posterior_contour_files": posterior_contour_files if cfg.save_posterior_plots else [],
-        "wandb_npe_project": cfg.wandb_npe_project if cfg.log_npe_to_wandb else None,
+        "inference_mode": cfg.inference_mode,
+        "best_seed_idx": best_seed_idx,
+        "mixture_weights": [float(w) for w in mixture_weights],
     }
     (results_dir / "results.json").write_text(json.dumps(results, indent=2))
-    if wandb_run is not None:
-        wandb_run.summary["results_dir"] = str(results_dir)
-        wandb_run.summary["fom_mean"] = float(fom_mean)
-        wandb_run.summary["fom_std"] = float(fom_std)
-        wandb_run.summary["best_val_nll"] = float(best_val_nll)
-        wandb_run.summary["npe_overall_best_state_file"] = "npe_flow.pt"
-        wandb_run.summary["npe_seed_checkpoint_count"] = int(len(seed_ckpt_files))
-        if seed_training_summary_file is not None:
-            wandb_run.summary["npe_seed_training_summary_file"] = seed_training_summary_file
-        if cfg.wandb_npe_log_model_paths:
-            wandb_run.summary["npe_overall_best_state_path"] = str(results_dir / "npe_flow.pt")
-            if seed_ckpt_files:
-                wandb_run.summary["npe_seed_checkpoint_paths"] = [
-                    str(results_dir / fname) for fname in seed_ckpt_files
-                ]
-            import wandb
 
-            artifact_name = re.sub(
-                r"[^A-Za-z0-9._-]+",
-                "-",
-                f"npe-models-{checkpoints_path.name or 'checkpoints'}-budget-{budget}",
+    # ── 8. GetDist posterior plot: one panel per fiducial observation, each panel
+    # overlaying the per-seed NF posteriors (not the pooled ensemble draw) so that
+    # seed-to-seed disagreement is visible. Axes are fixed to the requested
+    # Omega_m/S_8 ranges instead of showing the (much wider) prior box.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from getdist import MCSamples
+    from getdist import plots as gdplots
+
+    OMEGA_M_LIM = (0.1, 0.6)
+    S8_LIM = (0.7, 0.95)
+    fiducial_omega_m = THETA_MEAN[0]
+    fiducial_s8 = THETA_MEAN[1]
+
+    g = gdplots.get_subplot_plotter(subplot_size=3.5)
+    # Default getdist line_styles only has 12 entries; with npe_seeds > 12 (one
+    # line per seed per panel) plot_2d raises IndexError, so extend the palette.
+    n_seeds_plot = len(ensemble_flows)
+    if n_seeds_plot > len(g.settings.line_styles):
+        cmap = matplotlib.colormaps["tab20"]
+        g.settings.line_styles = [("-", cmap(j % 20)) for j in range(n_seeds_plot)]
+    g.make_figure(n_plot, nx=n_plot)
+    for i in range(n_plot):
+        mc_list = [
+            MCSamples(
+                samples=per_seed_posterior_samples[i][seed_idx],
+                names=["Omega_m", "S_8"],
+                labels=[r"\Omega_m", r"S_8"],
+                label=f"seed {seed_idx+1}",
             )
-            model_artifact = wandb.Artifact(name=artifact_name, type="model")
-            model_artifact.add_file(str(results_dir / "npe_flow.pt"), name="npe_flow.pt")
-            for fname in seed_ckpt_files:
-                model_artifact.add_file(str(results_dir / fname), name=fname)
-            if seed_training_summary_file is not None:
-                model_artifact.add_file(
-                    str(results_dir / seed_training_summary_file),
-                    name=seed_training_summary_file,
-                )
-            wandb_run.log_artifact(model_artifact)
-        wandb_run.finish()
+            for seed_idx in range(len(ensemble_flows))
+        ]
+        ax = g._subplot_number(i)
+        g.plot_2d(
+            mc_list, "Omega_m", "S_8", filled=False, ax=ax, add_legend_proxy=(i == 0)
+        )
+        ax.set_xlim(*OMEGA_M_LIM)
+        ax.set_ylim(*S8_LIM)
+        ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_title(f"obs {i+1}", fontsize=9)
+    g.add_legend(
+        [f"seed {seed_idx+1}" for seed_idx in range(len(ensemble_flows))],
+        legend_loc="lower left",
+        ax=g._subplot_number(0),
+        fontsize=8,
+        legend_ncol=2 if n_seeds_plot > 6 else 1,
+    )
+
+    plot_path = results_dir / "posterior_plot.png"
+    g.export(str(plot_path))
+    print(f"Posterior plot saved to {plot_path}")
+
+    # ── 8b. GetDist posterior plot: one panel per fiducial observation, each
+    # showing the single final mixture posterior (all_posterior_samples), i.e.
+    # what FoM/calibration actually use -- as opposed to the per-seed breakdown
+    # in the plot above.
+    g_ens = gdplots.get_subplot_plotter(subplot_size=3.5)
+    g_ens.make_figure(n_plot, nx=n_plot)
+    for i in range(n_plot):
+        mc_ens = MCSamples(
+            samples=all_posterior_samples[i],
+            names=["Omega_m", "S_8"],
+            labels=[r"\Omega_m", r"S_8"],
+            label="ensemble posterior",
+        )
+        ax = g_ens._subplot_number(i)
+        g_ens.plot_2d(
+            [mc_ens],
+            "Omega_m",
+            "S_8",
+            filled=True,
+            ax=ax,
+            add_legend_proxy=(i == 0),
+        )
+        ax.set_xlim(*OMEGA_M_LIM)
+        ax.set_ylim(*S8_LIM)
+        ax.axvline(fiducial_omega_m, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.axhline(fiducial_s8, color="k", ls="--", lw=0.8, alpha=0.6)
+        ax.set_title(f"obs {i+1}", fontsize=9)
+
+    ensemble_plot_path = results_dir / "ensemble_posterior_plot.png"
+    g_ens.export(str(ensemble_plot_path))
+    print(f"Ensemble posterior plot saved to {ensemble_plot_path}")
+
+    # Mixture weights as a single bar-chart panel (one bar per seed) instead of
+    # npe_seeds separate scalar metrics.
+    weights_table = wandb.Table(
+        data=[[f"seed{k+1}", float(w)] for k, w in enumerate(mixture_weights)],
+        columns=["seed", "weight"],
+    )
+
+    wandb.log(
+        {
+            "fom_mean": fom_mean,
+            "fom_std": fom_std,
+            "mse_mean": mse_mean,
+            "mse_std": mse_std,
+            "score_mean": score_mean,
+            "score_std": score_std,
+            "mse_nf_mean": mse_nf_mean,
+            "mse_nf_std": mse_nf_std,
+            "score_nf_mean": score_nf_mean,
+            "score_nf_std": score_nf_std,
+            "best_val_nll": best_val_nll,
+            "per_seed_posterior_plot": wandb.Image(str(plot_path)),
+            "ensemble_posterior_plot": wandb.Image(str(ensemble_plot_path)),
+            "mixture_weights_plot": wandb.plot.bar(
+                weights_table, "seed", "weight", title="Mixture weights"
+            ),
+        }
+    )
+
+    # ── 9. TARP + MIRA calibration tests ──
+    # 9a: on the NPE's own held-out validation data (same distribution as training —
+    # sanity check)
+    # 9b: on the flat dataset validation split (held-out maps, needs noise+mask)
+    calibration_results = {}
+    try:
+        import torch as _torch
+        from mira_score import mira as mira_score
+        from tarp import get_tarp_coverage
+
+        def _run_calibration(summaries_t, theta_norm, tag, n_cap=None):
+            """Sample posteriors then run TARP + MIRA.
+
+            Returns (ecp, alpha, mira_mean, mira_std).
+            """
+            n = len(summaries_t) if n_cap is None else min(n_cap, len(summaries_t))
+            summaries_t = _normalize_context(summaries_t[:n])
+            theta_norm = theta_norm[:n]
+
+            posterior = []
+            with _torch.no_grad():
+                for i in range(n):
+                    s_i = summaries_t[i : i + 1].to(device)
+                    samps = _sample_posterior(
+                        cfg.n_val_posterior_samples, s_i
+                    )  # (1, S, 2)
+                    posterior.append(samps.squeeze(0).cpu().numpy())
+            posterior_arr = np.stack(posterior, axis=0)  # (n, S, 2)
+
+            ecp, alpha = get_tarp_coverage(
+                samples=posterior_arr.transpose(1, 0, 2),  # (S, n, 2)
+                theta=theta_norm,
+                references="random",
+                metric="euclidean",
+                norm=True,
+            )
+            posterior_torch = _torch.from_numpy(posterior_arr).unsqueeze(
+                0
+            )  # (1, n, S, 2)
+            truth_torch = _torch.from_numpy(theta_norm.astype(np.float32))
+            m_mean, m_std = mira_score(
+                truth_torch, posterior_torch, num_runs=500, norm=True, device=device
+            )
+
+            # TARP plot
+            fig, ax = plt.subplots(figsize=(5, 5))
+            ax.plot(alpha, ecp, lw=2, label="NPE")
+            ax.plot([0, 1], [0, 1], "k--", lw=1, label="Ideal")
+            ax.fill_between(alpha, alpha, ecp, alpha=0.15)
+            ax.set_xlabel("Credibility level α")
+            ax.set_ylabel("Expected coverage probability")
+            ax.set_title(f"TARP [{tag}] budget={budget}, n={n}")
+            ax.legend()
+            tarp_path = results_dir / f"tarp_coverage_{tag}.png"
+            fig.savefig(str(tarp_path), dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            print(
+                f"  [{tag}] TARP max|ecp-α| = {np.max(np.abs(ecp - alpha)):.4f}  "
+                f"MIRA = {float(m_mean[0]):.4f} ± {float(m_std[0]):.4f}"
+            )
+            wandb.log(
+                {
+                    f"calibration/{tag}/tarp_plot": wandb.Image(str(tarp_path)),
+                    f"calibration/{tag}/mira_score": float(m_mean[0]),
+                    f"calibration/{tag}/mira_std": float(m_std[0]),
+                    f"calibration/{tag}/tarp_max_deviation": float(
+                        np.max(np.abs(ecp - alpha))
+                    ),
+                    f"calibration/{tag}/n_maps": n,
+                }
+            )
+            np.save(results_dir / f"tarp_ecp_{tag}.npy", ecp)
+            np.save(results_dir / f"tarp_alpha_{tag}.npy", alpha)
+            np.save(results_dir / f"val_posterior_samples_{tag}.npy", posterior_arr)
+            return ecp, alpha, m_mean, m_std
+
+        # 9a — NPE validation split (already computed, no reprocessing needed)
+        print("\nCalibration 9a: NPE held-out validation data...")
+        ecp_a, alpha_a, mira_mean_a, mira_std_a = _run_calibration(
+            s_val.cpu(),
+            t_val.cpu().numpy(),
+            tag="npe_val",
+            n_cap=cfg.n_val_maps,
+        )
+        calibration_results["npe_val"] = {
+            "mira_mean": float(mira_mean_a[0]),
+            "mira_std": float(mira_std_a[0]),
+            "tarp_max_deviation": float(np.max(np.abs(ecp_a - alpha_a))),
+        }
+
+        # 9b — flat dataset validation split (raw maps: add noise + mask first)
+        if load_flat_val is not None:
+            print("\nCalibration 9b: flat dataset validation split...")
+            from cosmoford import NOISE_STD as _NOISE_STD
+
+            _mask = np.concatenate([SURVEY_MASK[:, :88], SURVEY_MASK[620:1030, 88:]])
+            rng_val = np.random.default_rng(99)
+
+            flat_val = load_flat_val("validation").with_format("numpy")
+            n_flat = min(cfg.n_val_maps, len(flat_val))
+            kappa_flat = np.array(flat_val[:n_flat]["kappa"])
+            theta_flat = np.array(flat_val[:n_flat]["theta"])
+            theta_flat_norm = (
+                (theta_flat[:, :2] - THETA_MEAN[:2]) / THETA_STD[:2]
+            ).astype(np.float32)
+
+            flat_summaries = []
+            with _torch.no_grad():
+                for kappa_i in kappa_flat:
+                    kappa_rs = reshape_field_numpy(kappa_i[np.newaxis])[0]
+                    kappa_noisy = (
+                        kappa_rs + rng_val.standard_normal(kappa_rs.shape) * _NOISE_STD
+                    ) * _mask
+                    x = (
+                        _torch.from_numpy(kappa_noisy.astype(np.float32))
+                        .unsqueeze(0)
+                        .to(device)
+                    )
+                    flat_summaries.append(compressor.compress(x).cpu())
+            flat_summaries_t = _torch.cat(flat_summaries, dim=0)
+
+            ecp_b, alpha_b, mira_mean_b, mira_std_b = _run_calibration(
+                flat_summaries_t, theta_flat_norm, tag="flat_val"
+            )
+            calibration_results["flat_val"] = {
+                "mira_mean": float(mira_mean_b[0]),
+                "mira_std": float(mira_std_b[0]),
+                "tarp_max_deviation": float(np.max(np.abs(ecp_b - alpha_b))),
+            }
+
+    except Exception as e:
+        print(f"WARNING: TARP/MIRA calibration failed: {e}")
+
+    if calibration_results:
+        results["calibration"] = calibration_results
+        (results_dir / "results.json").write_text(json.dumps(results, indent=2))
+
+    wandb.finish()
 
     if vol is not None:
         vol.commit()
@@ -983,14 +1014,19 @@ if __name__ != "__main__":
             "jsonargparse[signatures,omegaconf]>=4.27.7",
             "peft",
             "nflows",
-            "getdist",
             "matplotlib",
             "scikit-learn",
+            "tarp",
+            "mira_score",
+            "getdist",
         )
         .add_local_dir("cosmoford", "/root/cosmoford", copy=True)
         .add_local_dir("configs", "/root/configs", copy=True)
         .add_local_file("pyproject.toml", "/root/pyproject.toml", copy=True)
-        .run_commands("cd /root && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e . --no-deps")
+        .run_commands(
+            "cd /root && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 "
+            "pip install -e . --no-deps"
+        )
     )
 
     app = modal.App("cosmoford-npe-budget-scan", image=image)
@@ -1012,15 +1048,21 @@ if __name__ != "__main__":
     )
     def train_npe_for_budget(budget: int):
         from datasets import load_dataset as _hf_load
+
         cfg = NPEConfig.from_yaml(MODAL_CONFIG_PATH)
         return _train_budget_core(
             budget,
             CHECKPOINTS_PATH,
             NPE_RESULTS_PATH,
             SUMMARIES_CACHE_PATH,
-            lambda split: _hf_load("CosmoStat/neurips-wl-challenge-holdout", split=split),
+            lambda split: _hf_load(
+                "CosmoStat/neurips-wl-challenge-holdout", split=split
+            ),
             cfg,
             vol=volume,
+            load_flat_val=lambda split: _hf_load(
+                "CosmoStat/neurips-wl-challenge-flat", split=split
+            ),
         )
 
     @app.function(
@@ -1029,6 +1071,7 @@ if __name__ != "__main__":
     )
     def load_all_results() -> list[dict]:
         import json
+
         volume.reload()
         results = []
         if NPE_RESULTS_PATH.exists():
@@ -1049,70 +1092,93 @@ if __name__ != "__main__":
         print(f"Waiting for {len(handles)} NPE runs to complete...")
         for h in handles:
             result = h.get()
-            print(f"  budget-{result['budget']}: FoM = {result['fom_mean']:.2f} ± {result['fom_std']:.2f}")
+            print(
+                f"  budget-{result['budget']}: "
+                f"FoM = {result['fom_mean']:.2f} ± {result['fom_std']:.2f}"
+            )
         print("All NPE budget scan runs completed.")
-
 
 
 # ── Local entry point ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
 
+    from datasets import load_from_disk
+
     parser = argparse.ArgumentParser(
         description="NPE budget scan — local cluster mode",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--checkpoints_path", required=True,
-                        help="Path to compressor checkpoints root (contains budget-N/ subdirs)")
-    parser.add_argument("--npe_results_path", required=True,
-                        help="Path where NPE results will be written")
-    parser.add_argument("--summaries_cache_path", required=True,
-                        help="Path for caching pre-computed summaries")
-    parser.add_argument("--holdout_path", required=False,
-                        help="Path to holdout DatasetDict (save_to_disk format, with 'train' and 'fiducial' splits)")
-    parser.add_argument("--holdout_train_path", required=False,
-                        help="Optional path to holdout train split dataset")
-    parser.add_argument("--holdout_fiducial_path", required=False,
-                        help="Optional path to holdout fiducial split dataset")
-    parser.add_argument("--config", required=True,
-                        help="Path to YAML config file (configs/experiments/npe_budget_scan.yaml)")
-    parser.add_argument("--budgets",
-                        help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
-                             "(overrides the budgets list in the config file)")
+    parser.add_argument(
+        "--checkpoints_path",
+        required=True,
+        help="Path to compressor checkpoints root (contains budget-N/ subdirs)",
+    )
+    parser.add_argument(
+        "--npe_results_path",
+        required=True,
+        help="Path where NPE results will be written",
+    )
+    parser.add_argument(
+        "--summaries_cache_path",
+        required=True,
+        help="Path for caching pre-computed summaries",
+    )
+    parser.add_argument(
+        "--holdout_path",
+        required=True,
+        help=(
+            "Path to holdout DatasetDict (save_to_disk format, "
+            "'train' and 'fiducial' splits)"
+        ),
+    )
+    parser.add_argument(
+        "--flat_dataset_path",
+        default=None,
+        help="Path to neurips-wl-challenge-flat DatasetDict (save_to_disk format). "
+        "If provided, TARP and MIRA calibration tests are run on the 'validation' "
+        "split.",
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to YAML config file (configs/experiments/npe_budget_scan.yaml)",
+    )
+    parser.add_argument(
+        "--budgets",
+        help="Comma-separated list of budgets to run, e.g. 100,500,20200 "
+        "(overrides the budgets list in the config file)",
+    )
     parser.add_argument(
         "--offline",
-        nargs="?",
-        const=True,
+        help="Disable W&B checkpoint fallback; raise an error if a checkpoint "
+        "is not found locally",
+        type=bool,
+    )
+    parser.add_argument(
+        "--context_normalization",
+        help="Enable context normalization",
         default=False,
-        type=lambda v: str(v).lower() in {"1", "true", "yes", "y"},
-        help="Disable W&B checkpoint fallback; supports --offline or --offline=true",
+        type=bool,
+    )
+    parser.add_argument(
+        "--inference_mode",
+        choices=["ensemble", "best"],
+        default=None,
+        help="'ensemble' samples from a uniform mixture over all npe_seeds flows; "
+        "'best' samples only from the single lowest-val_nll flow "
+        "(overrides the config file value)",
     )
     args = parser.parse_args()
 
     cfg = NPEConfig.from_yaml(args.config)
     if args.budgets is not None:
         cfg.budgets = [int(b) for b in args.budgets.split(",")]
+    if args.inference_mode is not None:
+        cfg.inference_mode = args.inference_mode
 
-    from datasets import load_from_disk
-    use_split_paths = args.holdout_train_path is not None or args.holdout_fiducial_path is not None
-    if use_split_paths:
-        if not (args.holdout_train_path and args.holdout_fiducial_path):
-            raise ValueError(
-                "When using split-specific holdout paths, both --holdout_train_path "
-                "and --holdout_fiducial_path must be provided."
-            )
-        holdout_train_ds = load_from_disk(args.holdout_train_path)
-        holdout_fiducial_ds = load_from_disk(args.holdout_fiducial_path)
-        holdout_splits = {"train": holdout_train_ds, "fiducial": holdout_fiducial_ds}
-        holdout_loader = lambda split, ds=holdout_splits: ds[split]
-    else:
-        if args.holdout_path is None:
-            raise ValueError(
-                "Either --holdout_path or both split-specific paths "
-                "(--holdout_train_path and --holdout_fiducial_path) must be provided."
-            )
-        holdout_ds = load_from_disk(args.holdout_path)
-        holdout_loader = lambda split, ds=holdout_ds: ds[split]
+    holdout_ds = load_from_disk(args.holdout_path)
+    flat_ds = load_from_disk(args.flat_dataset_path) if args.flat_dataset_path else None
 
     for budget in cfg.budgets:
         _train_budget_core(
@@ -1120,7 +1186,11 @@ if __name__ == "__main__":
             Path(args.checkpoints_path),
             Path(args.npe_results_path),
             Path(args.summaries_cache_path),
-            holdout_loader,
+            lambda split, ds=holdout_ds: ds[split],
             cfg,
             offline=args.offline,
+            load_flat_val=(
+                (lambda split, ds=flat_ds: ds[split]) if flat_ds is not None else None
+            ),
+            context_normalization=args.context_normalization,
         )
