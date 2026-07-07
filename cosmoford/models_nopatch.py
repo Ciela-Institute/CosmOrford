@@ -48,16 +48,34 @@ class _CondNet(nn.Module):
     return self.net(torch.cat([x, context], dim=-1))
 
 
-def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64, flow_type="maf"):
+def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64, flow_type="maf",
+               embedding_dim=None, embedding_hidden=256, embedding_dropout=0.0, made_dropout=0.0):
   """Build a conditional flow for p(params | summaries).
 
   flow_type: "maf" (Masked Autoregressive Flow) or "realnvp" (RealNVP affine coupling).
+  embedding_dim: if set, insert an MLP embedding net (context_dim -> embedding_dim) that is
+    trained *jointly* with the flow, and condition the transforms on the embedded context. This
+    is the standard NPE recipe for high-D data vectors (raw HOS ~320-941 D): it gives the flow a
+    learned, shared compression instead of re-ingesting the full raw vector in every transform's
+    small conditioning net. None => raw context straight into the transforms (original behavior,
+    so embedding_dim=None reproduces the pre-embedding flow bit-for-bit).
+  embedding_dropout / made_dropout: regularization for the high-D / low-data regime.
   """
   if Flow is None or StandardNormal is None:
     raise ImportError(
       "build_flow requires the optional 'nflows' dependency. "
       "Install nflows to enable posterior-flow training."
     )
+  embedding_net = None
+  cond_dim = context_dim
+  if embedding_dim:
+    nn = torch.nn
+    embedding_net = nn.Sequential(
+      nn.Linear(context_dim, embedding_hidden), nn.ReLU(), nn.Dropout(embedding_dropout),
+      nn.Linear(embedding_hidden, embedding_hidden), nn.ReLU(), nn.Dropout(embedding_dropout),
+      nn.Linear(embedding_hidden, embedding_dim),
+    )
+    cond_dim = embedding_dim  # transforms condition on the EMBEDDED context
   transforms = []
   if flow_type == "realnvp":
     if AffineCouplingTransform is None:
@@ -65,7 +83,7 @@ def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64, flow_t
     for i in range(n_transforms):
       mask = torch.zeros(param_dim)
       mask[i % param_dim] = 1  # alternate which dims are transformed
-      ctx, h = context_dim, hidden_dim
+      ctx, h = cond_dim, hidden_dim
       transforms.append(AffineCouplingTransform(
         mask=mask,
         transform_net_create_fn=lambda in_f, out_f, ctx=ctx, h=h: _CondNet(in_f, out_f, h, ctx),
@@ -76,11 +94,13 @@ def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64, flow_t
       transforms.append(MaskedAffineAutoregressiveTransform(
         features=param_dim,
         hidden_features=hidden_dim,
-        context_features=context_dim,
+        context_features=cond_dim,
+        dropout_probability=made_dropout,
       ))
   return Flow(
     transform=CompositeTransform(transforms),
     distribution=StandardNormal([param_dim]),
+    embedding_net=embedding_net,
   )
 
 
