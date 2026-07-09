@@ -49,10 +49,13 @@ class _CondNet(nn.Module):
 
 
 def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64, flow_type="maf",
-               embedding_dim=None, embedding_hidden=256, embedding_dropout=0.0, made_dropout=0.0):
+               embedding_dim=None, embedding_hidden=256, embedding_dropout=0.0, made_dropout=0.0,
+               num_bins=8, tail_bound=5.0):
   """Build a conditional flow for p(params | summaries).
 
-  flow_type: "maf" (Masked Autoregressive Flow) or "realnvp" (RealNVP affine coupling).
+  flow_type: "maf" (Masked Autoregressive Flow), "nsf" (Neural Spline Flow — masked
+    rational-quadratic autoregressive; num_bins/tail_bound control the spline; theta is z-scored
+    so tail_bound~5 covers it), or "realnvp" (RealNVP affine coupling).
   embedding_dim: if set, insert an MLP embedding net (context_dim -> embedding_dim) that is
     trained *jointly* with the flow, and condition the transforms on the embedded context. This
     is the standard NPE recipe for high-D data vectors (raw HOS ~320-941 D): it gives the flow a
@@ -87,6 +90,19 @@ def build_flow(param_dim=2, context_dim=8, n_transforms=4, hidden_dim=64, flow_t
       transforms.append(AffineCouplingTransform(
         mask=mask,
         transform_net_create_fn=lambda in_f, out_f, ctx=ctx, h=h: _CondNet(in_f, out_f, h, ctx),
+      ))
+  elif flow_type == "nsf":
+    from nflows.transforms import MaskedPiecewiseRationalQuadraticAutoregressiveTransform as _NSF
+    for _ in range(n_transforms):
+      transforms.append(RandomPermutation(features=param_dim))
+      transforms.append(_NSF(
+        features=param_dim,
+        hidden_features=hidden_dim,
+        context_features=cond_dim,
+        num_bins=num_bins,
+        tails="linear",
+        tail_bound=tail_bound,
+        dropout_probability=made_dropout,
       ))
   else:  # maf (default)
     for _ in range(n_transforms):
