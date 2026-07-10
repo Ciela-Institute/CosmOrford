@@ -45,14 +45,17 @@ plt.rcParams.update({
 parser = argparse.ArgumentParser()
 parser.add_argument("--exp_config", type=str, required=True, help="Path to experiment YAML")
 parser.add_argument("--sim_budget", type=int, default=None, help="Number of N-body simulations to train on (null = full dataset)")
+parser.add_argument("--num_refs", type=int, default=None, help="Number of reference points for PQMass (overrides config)")
 cli = parser.parse_args()
 
 with open(cli.exp_config) as f:
     _cfg = yaml.safe_load(f)
 _cfg.pop("exp_name", None)
 
-_defaults = {"seed": 42}
+_defaults = {"seed": 42, "num_refs": 100}
 _defaults.update(_cfg)
+if cli.num_refs is not None:
+    _defaults["num_refs"] = cli.num_refs
 args = argparse.Namespace(**_defaults)
 
 torch.manual_seed(args.seed)
@@ -402,7 +405,7 @@ def _run_pqm(model, label, seed, fig_path, chi2_key, plot_key, extra_log=None):
             pqm_chunks.append(pred_chunk[-1])  # (chunk, H, W)
         maps_gen = np.concatenate(pqm_chunks, axis=0)  # (B, H, W)
 
-        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=100)
+        chi2_vals, fig = pqm_evaluate(maps_ref, maps_gen, num_refs=args.num_refs)
         fig.suptitle(f"PQMass: N-body vs UNet ({label})", fontsize=13)
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
