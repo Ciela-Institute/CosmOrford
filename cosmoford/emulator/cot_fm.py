@@ -70,7 +70,7 @@ with open(cli.exp_config) as f:
     _cfg = yaml.safe_load(f)
 _cfg.pop("exp_name", None)
 
-_defaults = {"seed": 42, "dataset_dir_pqm_nbody": None}
+_defaults = {"seed": 42, "dataset_dir_pqm_nbody": None, "log_transform": False}
 _defaults.update(_cfg)
 args = argparse.Namespace(**_defaults)
 
@@ -149,6 +149,7 @@ field_npix_x = _kappa_rs.shape[-1]
 field_npix_y = _kappa_rs.shape[-2]
 # Align y dimension at init with training-time y (lognormal theta[:,1:])
 nb_of_params_to_infer = 3
+
 
 
 # just because I cannot access Noe's dataset directly
@@ -254,7 +255,26 @@ def get_ot_batch(
     theta_x1_paired = theta_x1[inds_x1]
     vmask1 = vmask1[inds_x1]
     hmask1 = hmask1[inds_x1]
+
+    if args.log_transform:
+        # Shift derived from paired lognormal map before masking (masked zeros
+        # would contaminate the min). min(κ_logn) ≈ −λ_GLASS, so −min + margin
+        # guarantees κ + shift > 0 for both x0 and x1 in the same cosmo regime.
+        x0_flat = x0_paired.reshape(len(x0_paired), -1)   # (B, H*W)
+        shifts = -x0_flat.min(axis=1) + 0.01              # (B,)
+        x0_paired = np.stack([
+            np.log(np.maximum(x0_paired[i] + shifts[i], 1e-10))
+            for i in range(len(x0_paired))
+        ])
+        x1_paired = np.stack([
+            np.log(np.maximum(x1_paired[i] + shifts[i], 1e-10))
+            for i in range(len(x1_paired))
+        ])
+
     x0_paired = apply_mask(x0_paired, vmask1, hmask1)
+    if args.log_transform:
+        # Zero-mask x1 after log transform so masked pixels match x0 (= 0).
+        x1_paired = apply_mask(x1_paired, vmask1, hmask1)
 
     # Convert to torch tensors with desired shapes
     # Ensure channel-last shape then to torch (B, 1, H, W)
@@ -272,6 +292,7 @@ def get_ot_batch(
         "t": t,
         "theta_x0": theta_x0_t,
         "theta_x1": theta_x1_t,
+        "log_shifts": shifts if args.log_transform else None,
     }
 
 
@@ -376,6 +397,7 @@ wandb_kwargs = dict(
         "ot_reg": args.ot_reg,
         "ot_method": args.ot_method,
         "sim_budget": sim_budget,
+        "log_transform": args.log_transform,
         "model_config": config,
         "config_source": config_source,
     },
@@ -487,8 +509,18 @@ def _run_map_eval(model, label, seed, fig_path, key_prefix, extra_log=None):
 
         # ── 4. Generate maps via ODE ─────────────────────────────────────────
         x0_logn = reshape_field_numpy(kappa_logn)               # (k, H_red, W_red)
-        x0_t    = torch.from_numpy(x0_logn[:, None]).float()    # (k, 1, H_red, W_red)
-        theta_t = torch.from_numpy(theta_logn[:, :2]).float()   # (k, 2)
+        if args.log_transform:
+            # Shift from unmasked x0, then log transform, then mask — mirrors training.
+            _shifts = -x0_logn.reshape(len(x0_logn), -1).min(axis=1) + 0.01  # (k,)
+            x0_log = np.stack([
+                np.log(np.maximum(x0_logn[i] + _shifts[i], 1e-10))
+                for i in range(len(x0_logn))
+            ])
+            x0_input = apply_mask(x0_log)
+        else:
+            x0_input = x0_logn
+        x0_t    = torch.from_numpy(x0_input[:, None]).float()    # (k, 1, H_red, W_red)
+        theta_t = torch.from_numpy(theta_logn).float()            # (k, 3)
 
         gen_chunks = []
         for start in range(0, x0_t.shape[0], micro_bs):
@@ -501,6 +533,9 @@ def _run_map_eval(model, label, seed, fig_path, key_prefix, extra_log=None):
                 )
             gen_chunks.append(pred[-1])   # (chunk, H_red, W_red) numpy
         maps_gen = np.concatenate(gen_chunks, axis=0)  # (k, H_red, W_red)
+        if args.log_transform:
+            maps_gen = np.stack([np.exp(maps_gen[i]) - _shifts[i] for i in range(len(maps_gen))])
+        maps_gen = apply_mask(maps_gen)
 
         metrics = {}
         log     = {}
@@ -769,6 +804,12 @@ while step < max_steps:
                 x0_np = batch_test["x0"][0].detach().cpu().squeeze(0).numpy()  # (H,W)
                 x1_np = batch_test["x1"][0].detach().cpu().squeeze(0).numpy()  # (H,W)
                 pred_np = x_1_pred[-1, 0]  # (H,W) numpy
+                if args.log_transform:
+                    # Use the per-sample shift stored at OT-pairing time for sample 0.
+                    _shift0 = float(batch_test["log_shifts"][0])
+                    x0_np   = np.exp(x0_np)   - _shift0
+                    x1_np   = np.exp(x1_np)   - _shift0
+                    pred_np = np.exp(pred_np)  - _shift0
                 # Use consistent color scaling across panels to aid visual comparison
                 all_vals = np.concatenate(
                     [x0_np.ravel(), pred_np.ravel(), x1_np.ravel()]

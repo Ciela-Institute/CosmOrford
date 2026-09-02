@@ -33,12 +33,14 @@ def iter_microbatches(batch: dict[str, torch.Tensor], micro_bs: int):
         }
 
 
+
 def preprocess_batch(batch, rng: np.random.Generator):
     """Prepare NumPy batches with minimal conversions before UNet.
 
     - For lognormal: select one of the 10 maps per sim, reshape via NumPy helper
     - For nbody: reshape via NumPy helper
     - Return NumPy arrays; torch conversion happens right before UNet
+    - Log transform (if enabled) is applied in get_ot_batch after OT pairing
     """
     batch_lognormal, batch_nbody = batch
     idx = rng.integers(low=0, high=10)

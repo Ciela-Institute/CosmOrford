@@ -81,6 +81,8 @@ model.load_state_dict(state, strict=True)
 model.eval()
 print("Model loaded successfully!")
 
+_log_transform = bool(getattr(args, "log_transform", False))
+
 def get_data(batch_logn):
         """Run model forward and return (theta, predicted_maps) with NumPy-first pipeline.
 
@@ -88,14 +90,29 @@ def get_data(batch_logn):
             batch_logn['kappa']: numpy array (B_total, H, W)
             batch_logn['theta']: numpy array (B_total, P)
         Returns numpy arrays with matching first dim B_total.
+        Maps are always stored in κ-space (inverse log-transform applied here if needed).
         """
         theta = np.asarray(batch_logn['theta'])  # (B, P)
         maps = np.asarray(batch_logn['kappa'])   # (B, H, W)
         assert maps.ndim == 3 and theta.ndim == 2, f"Unexpected shapes: maps {maps.shape}, theta {theta.shape}"
         # Reshape to reduced representation in NumPy (B, 1834, 88)
         maps_reduced_np = reshape_field_numpy(maps)
-        # Mask inputs in NumPy (trained on masked data)
-        maps_mask_np = apply_mask(maps_reduced_np)
+
+        if _log_transform:
+            # Per-sample shift derived from unmasked lognormal map (min ≈ −λ_GLASS).
+            # Must be computed before masking so masked zeros don't contaminate the min.
+            shifts = -maps_reduced_np.reshape(len(maps_reduced_np), -1).min(axis=1) + 0.01
+
+        if _log_transform:
+            # Log transform first (on unmasked), then mask — mirrors training order
+            # so that non-survey pixels are 0 in log space (not log(0+shift)).
+            maps_log_np = np.stack([
+                np.log(np.maximum(maps_reduced_np[i] + shifts[i], 1e-10))
+                for i in range(len(maps_reduced_np))
+            ])
+            maps_mask_np = apply_mask(maps_log_np)
+        else:
+            maps_mask_np = apply_mask(maps_reduced_np)
         # Call solver: it will convert to torch internally if needed
         x_traj_np = solve_ode_forward(
             maps_mask_np,
@@ -106,8 +123,12 @@ def get_data(batch_logn):
             atol = args.atol,
             nb_steps=args.nb_steps
         )  # (T, B, 1834, 88)
-        # Final step, inverse reshape to full size and mask again
+        # Final step: inverse log-transform to κ-space, then mask and reshape
         x_final_np = x_traj_np[-1]
+        if _log_transform:
+            x_final_np = np.stack(
+                [np.exp(x_final_np[i]) - shifts[i] for i in range(len(x_final_np))]
+            )
         x_full_mask_np = apply_mask(x_final_np)
         x_full_np = inverse_reshape_field_numpy(x_full_mask_np)                 # (B, 1424, 176)
         return theta, x_full_np

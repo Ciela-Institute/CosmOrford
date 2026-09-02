@@ -7,6 +7,8 @@ wandb_entity: juzgh_perso
 wandb_run_name: "unet/budget_scan/lognormal_small"
 wandb_mode: offline
 
+log_transform: true   # apply log(κ + 0.15) to N-body x1 during training
+
 # Best hyperparameters from ablation phases
 ot_method: emd
 ot_reg: 0.1       # unused for emd
